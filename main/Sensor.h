@@ -12,6 +12,7 @@
 #include "AirgradientUART.h"
 #include "BQ25672.h"
 #include "PMS.h"
+#include "DGSx.h"
 #include "Sunlight.h"
 #include "airgradientClient.h"
 #include "sht4x.h"
@@ -67,6 +68,10 @@ private:
   bool _pms2Available = true;
   AirgradientSerial *agsPM2_ = nullptr;
   PMS *pms2_ = nullptr;
+
+  bool _dgsxAvailable = true;
+  AirgradientSerial *agsDGSx_ = nullptr;
+  DGSx *dgsx_ = nullptr;
 
   bool _chargerAvailable = true;
   BQ25672 *charger_ = nullptr;

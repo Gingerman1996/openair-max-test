@@ -212,14 +212,97 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
     // NOTE: Since UART, need to check if its actually able to communicate?
   }
 
-  // PMS 2
-  agsPM2_ = new AirgradientIICSerial(_busHandle, SUBUART_CHANNEL_2, 0, 1);
-  if (agsPM2_->begin(9600) == false) {
-    ESP_LOGE(TAG, "Failed open serial for PM sensor 2");
-    _pms2Available = false;
+  ///////////////////////////////////////////////////////////////////////////
+  // PMS 2 - COMMENTED OUT FOR DGSx TESTING
+  ///////////////////////////////////////////////////////////////////////////
+  // agsPM2_ = new AirgradientIICSerial(_busHandle, SUBUART_CHANNEL_2, 0, 1);
+  // if (agsPM2_->begin(9600) == false) {
+  //   ESP_LOGE(TAG, "Failed open serial for PM sensor 2");
+  //   _pms2Available = false;
+  // } else {
+  //   pms2_ = new PMS(agsPM2_);
+  // }
+  _pms2Available = false; // Disabled for DGSx testing
+  ///////////////////////////////////////////////////////////////////////////
+
+  ///////////////////////////////////////////////////////////////////////////
+  // DGSx Gas Sensor - USING SUBUART_CHANNEL_2
+  ///////////////////////////////////////////////////////////////////////////
+  agsDGSx_ = new AirgradientIICSerial(_busHandle, SUBUART_CHANNEL_2, 0, 1);
+  if (agsDGSx_->begin(9600) == false) {
+    ESP_LOGE(TAG, "Failed open serial for DGSx gas sensor");
+    _dgsxAvailable = false;
   } else {
-    pms2_ = new PMS(agsPM2_);
+    dgsx_ = new DGSx(agsDGSx_);
+    if (!dgsx_->begin()) {
+      ESP_LOGE(TAG, "Failed to initialize DGSx sensor: %s", dgsx_->getLastError());
+      _dgsxAvailable = false;
+    } else {
+      ESP_LOGI(TAG, "DGSx gas sensor initialized successfully");
+      
+      // Clear any existing data first
+      dgsx_->clearBuffer();
+      vTaskDelay(pdMS_TO_TICKS(500));
+      
+      // Query and read sensor EEPROM information
+      ESP_LOGI(TAG, "Querying DGSx EEPROM information...");
+      if (dgsx_->queryEEPROM()) {
+        ESP_LOGI(TAG, "DGSx EEPROM query sent successfully");
+        
+        // Wait and read EEPROM response
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Longer wait
+        DGSx::Data eepromData;
+        for (int i = 0; i < 20; i++) { // Try for 10 seconds
+          if (dgsx_->read(eepromData)) {
+            ESP_LOGI(TAG, "EEPROM Response received");
+            break;
+          }
+          vTaskDelay(pdMS_TO_TICKS(500));
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to send DGSx EEPROM query");
+      }
+      
+      // Wait before next query
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      
+      // Query and read sensor header information (DGS2 specific)
+      ESP_LOGI(TAG, "Querying DGSx header information...");
+      if (dgsx_->queryHeader()) {
+        ESP_LOGI(TAG, "DGSx header query sent successfully");
+        
+        // Wait and read header response
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Longer wait
+        DGSx::Data headerData;
+        for (int i = 0; i < 20; i++) { // Try for 10 seconds
+          if (dgsx_->read(headerData)) {
+            ESP_LOGI(TAG, "Header Response received");
+            if (!headerData.gasType.empty()) {
+              ESP_LOGI(TAG, "Gas Type: %s", headerData.gasType.c_str());
+            }
+            if (!headerData.sensorType.empty()) {
+              ESP_LOGI(TAG, "Sensor Type: %s", headerData.sensorType.c_str());
+            }
+            break;
+          }
+          vTaskDelay(pdMS_TO_TICKS(500));
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to send DGSx header query");
+      }
+      
+      // Wait before measurement attempt
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      
+      // Check if sensor is connected and responding
+      if (!dgsx_->isConnected()) {
+        ESP_LOGW(TAG, "DGSx sensor may not be properly connected");
+      } else {
+        ESP_LOGI(TAG, "DGSx sensor is responding to queries");
+      }
+    }
   }
+  ///////////////////////////////////////////////////////////////////////////
 
   // Warm up SGP41 and PMS
   _warmUpSensor();
@@ -232,22 +315,48 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
       _pms1Available = false;
     }
   }
-  if (_pms2Available) {
-    if (pms2_->isConnected() == false) {
-      ESP_LOGE(TAG, "PMS2 is not connected");
-      _pms2Available = false;
+  
+  ///////////////////////////////////////////////////////////////////////////
+  // PMS2 CONNECTION CHECK - COMMENTED OUT FOR DGSx TESTING
+  ///////////////////////////////////////////////////////////////////////////
+  // if (_pms2Available) {
+  //   if (pms2_->isConnected() == false) {
+  //     ESP_LOGE(TAG, "PMS2 is not connected");
+  //     _pms2Available = false;
+  //   }
+  // }
+  ///////////////////////////////////////////////////////////////////////////
+
+  ///////////////////////////////////////////////////////////////////////////
+  // DGSx CONNECTION CHECK
+  ///////////////////////////////////////////////////////////////////////////
+  // Check DGSx connection
+  ESP_LOGI(TAG, "Checking DGSx sensor connection");
+  if (_dgsxAvailable) {
+    if (dgsx_->isConnected() == false) {
+      ESP_LOGE(TAG, "DGSx is not connected");
+      _dgsxAvailable = false;
+    } else {
+      ESP_LOGI(TAG, "DGSx sensor is connected and responding");
     }
   }
+  ///////////////////////////////////////////////////////////////////////////
 
   ESP_LOGI(TAG, "Initialize finish");
 
   if (model == Configuration::O_M_1PPSTON_CE) {
-    return (_co2Available && _pms1Available && _pms2Available &&
+    ///////////////////////////////////////////////////////////////////////////
+    // RETURN WITH DGSx INSTEAD OF PMS2 FOR TESTING
+    ///////////////////////////////////////////////////////////////////////////
+    return (_co2Available && _pms1Available && _dgsxAvailable &&
             _chargerAvailable && _tvocNoxAvailable && _tempHumAvailable &&
             _alphaSenseGasAvailable && _alphaSenseTempAvailable);
 
   } else {
-    return (_co2Available && _pms1Available && _pms2Available &&
+    ///////////////////////////////////////////////////////////////////////////
+    // RETURN WITH DGSx INSTEAD OF PMS2 FOR TESTING
+    ///////////////////////////////////////////////////////////////////////////
+    return (_co2Available && _pms1Available && _dgsxAvailable &&
             _chargerAvailable && _tvocNoxAvailable && _tempHumAvailable);
   }
 }
@@ -402,8 +511,8 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     if (co2_->is_single_mode()) {
       int triggerResult = co2_->trigger_single_measurement();
       if (triggerResult == 0) {
-        // Wait for measurement to complete (typically 2-3 seconds for CO2 sensors)
-        vTaskDelay(pdMS_TO_TICKS(3000)); // Wait 3 seconds
+        // Reduced wait time for faster measurement cycles (from 3000ms to 2500ms)
+        vTaskDelay(pdMS_TO_TICKS(2500)); // Wait 2.5 seconds instead of 3
         ESP_LOGD(TAG, "Single measurement triggered, reading CO2 value...");
       } else {
         ESP_LOGW(TAG, "Failed to trigger single measurement, trying to read anyway...");
@@ -533,6 +642,45 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     data.afeTemp = alphaSense_->getTemperature();
     ESP_LOGD(TAG, "AFE Temperature: %.3fmV", data.afeTemp);
   }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // DGSx Gas Sensor Measurement - OPTIMIZED FOR SPEED
+  ///////////////////////////////////////////////////////////////////////////
+  if (_dgsxAvailable) {
+    ESP_LOGD(TAG, "Reading DGSx gas sensor...");
+    
+    // Clear buffer and request measurement
+    dgsx_->clearBuffer();
+    dgsx_->requestMeasurement();
+    
+    // Reduced wait time for faster response
+    vTaskDelay(pdMS_TO_TICKS(500)); // Reduced from 1000ms to 500ms
+    
+    DGSx::Data dgsxData;
+    // Reduced timeout from 3000ms to 1500ms for faster measurement cycles
+    if (dgsx_->readUntil(dgsxData, 1500)) {
+      if (dgsxData.isValid) {
+        ESP_LOGD(TAG, "DGSx measurement successful:");
+        ESP_LOGD(TAG, "  Gas Concentration: %.2f", dgsxData.gasConcentration);
+        ESP_LOGD(TAG, "  Temperature: %.1f°C", dgsxData.temperature);
+        ESP_LOGD(TAG, "  Humidity: %.1f%%", dgsxData.humidity);
+        if (!dgsxData.gasType.empty()) {
+          ESP_LOGD(TAG, "  Gas Type: %s", dgsxData.gasType.c_str());
+        }
+        
+        // Store the data in the payload structure
+        // For now, we'll store gas concentration in a temporary variable
+        // You may need to add proper fields to MaxSensorPayload structure
+        ESP_LOGI(TAG, "🌬️ DGSx Gas: %.2f PPB (%s)", dgsxData.gasConcentration, 
+                 dgsxData.gasType.empty() ? "Unknown" : dgsxData.gasType.c_str());
+      } else {
+        ESP_LOGW(TAG, "DGSx measurement returned invalid data");
+      }
+    } else {
+      ESP_LOGW(TAG, "Failed to get DGSx measurement: %s", dgsx_->getLastError());
+    }
+  }
+  ///////////////////////////////////////////////////////////////////////////
 }
 
 void Sensor::_applyIteration(AirgradientClient::MaxSensorPayload &data) {
@@ -700,7 +848,10 @@ void Sensor::_warmUpSensor() {
     }
   }
 
-  // Warmup PM1 and PM2 while also do SGP conditioning
+  ///////////////////////////////////////////////////////////////////////////
+  // WARMUP SENSORS - PMS2 COMMENTED OUT FOR DGSx TESTING
+  ///////////////////////////////////////////////////////////////////////////
+  // Warmup PM1 while also do SGP conditioning (PMS2 commented out for DGSx testing)
   // Only if sensor is available
   for (int i = 10; i >= 0; i--) {
     ESP_LOGI(TAG, "Warming up PMS and/or SGP41 sensors %d", i);
@@ -708,9 +859,13 @@ void Sensor::_warmUpSensor() {
     if (_pms1Available) {
       pms1_->passiveMode();
     }
-    if (_pms2Available) {
-      pms2_->passiveMode();
-    }
+    ///////////////////////////////////////////////////////////////////////////
+    // PMS2 WARMUP COMMENTED OUT FOR DGSx TESTING
+    ///////////////////////////////////////////////////////////////////////////
+    // if (_pms2Available) {
+    //   pms2_->passiveMode();
+    // }
+    ///////////////////////////////////////////////////////////////////////////
     if (_tvocNoxAvailable) {
       uint16_t sraw_voc;
       // NOTE: Use sgp4x_execute_compensated_conditioning() to pass rhum and
