@@ -263,36 +263,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
         ESP_LOGW(TAG, "Failed to send DGSx EEPROM query");
       }
       
-      // Wait before next query
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      
-      // Query and read sensor header information (DGS2 specific)
-      ESP_LOGI(TAG, "Querying DGSx header information...");
-      if (dgsx_->queryHeader()) {
-        ESP_LOGI(TAG, "DGSx header query sent successfully");
-        
-        // Wait and read header response
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Longer wait
-        DGSx::Data headerData;
-        for (int i = 0; i < 20; i++) { // Try for 10 seconds
-          if (dgsx_->read(headerData)) {
-            ESP_LOGI(TAG, "Header Response received");
-            if (!headerData.gasType.empty()) {
-              ESP_LOGI(TAG, "Gas Type: %s", headerData.gasType.c_str());
-            }
-            if (!headerData.sensorType.empty()) {
-              ESP_LOGI(TAG, "Sensor Type: %s", headerData.sensorType.c_str());
-            }
-            break;
-          }
-          vTaskDelay(pdMS_TO_TICKS(500));
-        }
-      } else {
-        ESP_LOGW(TAG, "Failed to send DGSx header query");
-      }
-      
-      // Wait before measurement attempt
-      vTaskDelay(pdMS_TO_TICKS(2000));
+      // vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for EEPROM query to complete (optimized timing)
       
       // Check if sensor is connected and responding
       if (!dgsx_->isConnected()) {
@@ -384,6 +355,7 @@ bool Sensor::startMeasures(int iterations, int intervalMs) {
   _averageMeasure.no2WorkingElectrode = DEFAULT_INVALID_VOLT;
   _averageMeasure.no2AuxiliaryElectrode = DEFAULT_INVALID_VOLT;
   _averageMeasure.afeTemp = DEFAULT_INVALID_VOLT;
+  _averageMeasure.dgsxGasConcentration = -1.0f; // Initialize DGSx gas concentration to invalid
 
   AirgradientClient::MaxSensorPayload iterationData;
 
@@ -505,6 +477,7 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   data.no2WorkingElectrode = DEFAULT_INVALID_VOLT;
   data.no2AuxiliaryElectrode = DEFAULT_INVALID_VOLT;
   data.afeTemp = DEFAULT_INVALID_VOLT;
+  data.dgsxGasConcentration = -1.0f; // Initialize DGSx gas concentration to invalid
 
   if (_co2Available) {
     // Check if sensor is in single mode and trigger measurement if needed
@@ -668,9 +641,9 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
           ESP_LOGD(TAG, "  Gas Type: %s", dgsxData.gasType.c_str());
         }
         
-        // Store the data in the payload structure
-        // For now, we'll store gas concentration in a temporary variable
-        // You may need to add proper fields to MaxSensorPayload structure
+        // Store the DGSx gas concentration in the payload structure
+        data.dgsxGasConcentration = dgsxData.gasConcentration;
+        
         ESP_LOGI(TAG, "🌬️ DGSx Gas: %.2f PPB (%s)", dgsxData.gasConcentration, 
                  dgsxData.gasType.empty() ? "Unknown" : dgsxData.gasType.c_str());
       } else {
@@ -832,6 +805,16 @@ void Sensor::_applyIteration(AirgradientClient::MaxSensorPayload &data) {
     }
     _afeTempIterationOkCount = _afeTempIterationOkCount + 1;
   }
+
+  // DGSx gas concentration averaging
+  if (data.dgsxGasConcentration >= 0) {
+    if (_averageMeasure.dgsxGasConcentration < 0) {
+      _averageMeasure.dgsxGasConcentration = data.dgsxGasConcentration;
+    } else {
+      _averageMeasure.dgsxGasConcentration = _averageMeasure.dgsxGasConcentration + data.dgsxGasConcentration;
+    }
+    _dgsxIterationOkCount = _dgsxIterationOkCount + 1;
+  }
 }
 
 void Sensor::_warmUpSensor() {
@@ -950,5 +933,10 @@ void Sensor::_calculateMeasuresAverage() {
   if (_afeTempIterationOkCount > 0) {
     _averageMeasure.afeTemp =
         _averageMeasure.afeTemp / _afeTempIterationOkCount;
+  }
+
+  if (_dgsxIterationOkCount > 0) {
+    _averageMeasure.dgsxGasConcentration =
+        _averageMeasure.dgsxGasConcentration / _dgsxIterationOkCount;
   }
 }

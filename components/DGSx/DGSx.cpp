@@ -34,9 +34,6 @@ bool DGSx::begin() {
   // Clear any existing data
   clearBuffer();
   
-  // Try to query header (DGS2 specific)
-  queryHeader();
-  
   ESP_LOGI(TAG, "DGSx sensor initialized");
   return true;
 }

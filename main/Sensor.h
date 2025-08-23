@@ -54,6 +54,7 @@ private:
   int _no2WEIterationOkCount = 0;
   int _no2AEIterationOkCount = 0;
   int _afeTempIterationOkCount = 0;
+  int _dgsxIterationOkCount = 0; // DGSx gas concentration iteration count
   AirgradientClient::MaxSensorPayload _averageMeasure;
   i2c_master_bus_handle_t _busHandle;
 
