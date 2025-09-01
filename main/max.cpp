@@ -15,6 +15,7 @@
 #include "airgradientOtaWifi.h"
 #include "airgradientWifiClient.h"
 #include "esp_console.h"
+#include "argtable3/argtable3.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_system.h"
@@ -127,6 +128,17 @@ static bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
                                AirgradientClient::MaxSensorPayload sensorPayload);
 static bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCache);
 
+// GNSS test commands
+static int gnss_init_cmd(int argc, char **argv);
+static int gnss_start_cmd(int argc, char **argv);
+static int gnss_stop_cmd(int argc, char **argv);
+static int gnss_location_cmd(int argc, char **argv);
+static int gnss_test_cmd(int argc, char **argv);
+static int gnss_hotstart_cmd(int argc, char **argv);
+static int gnss_coldstart_cmd(int argc, char **argv);
+static int gnss_agps_cmd(int argc, char **argv);
+static void register_gnss_commands();
+
 extern "C" void app_main(void) {
   // Re-initialize console for logging only if it just wake up after deepsleep
   esp_sleep_wakeup_cause_t wakeUpReason = esp_sleep_get_wakeup_cause();
@@ -146,6 +158,9 @@ extern "C" void app_main(void) {
     // Initialize boot button event handler only on the first boot
     // So on next boot onwards, boot button will not function
     initBootButton();
+    
+    // Register console commands for GNSS testing on first boot only
+    register_gnss_commands();
   }
 
   // Initialize NVS
@@ -973,4 +988,262 @@ bool checkRemoteConfiguration(unsigned long wakeUpCounter) {
   }
 
   return true;
+}
+
+// GNSS test command implementations
+static int gnss_init_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized. Please connect to cellular network first.\n");
+    return 1;
+  }
+
+  printf("Initializing GNSS...\n");
+  auto result = g_cellularCard->gnssInit();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS initialized successfully\n");
+    return 0;
+  } else {
+    printf("Failed to initialize GNSS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_start_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized. Please run gnss_init first.\n");
+    return 1;
+  }
+
+  printf("Starting GNSS positioning...\n");
+  auto result = g_cellularCard->gnssStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS positioning started successfully\n");
+    printf("NMEA data should now be streaming to UART port\n");
+    return 0;
+  } else {
+    printf("Failed to start GNSS positioning (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_stop_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  printf("Stopping GNSS...\n");
+  auto result = g_cellularCard->gnssStop();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS stopped successfully\n");
+    return 0;
+  } else {
+    printf("Failed to stop GNSS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_location_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  printf("Reading GNSS location...\n");
+  auto result = g_cellularCard->gnssGetLocation();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("Location: %s\n", result.data.c_str());
+    printf("Format: [mode],[GPS-SVs],[GLONASS-SVs],[BEIDOU-SVs],[lat],[N/S],[lon],[E/W],[date],[UTC-time],[alt],[speed],[course],[PDOP],[HDOP],[VDOP]\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("No GNSS fix available. Please wait for satellites to be acquired.\n");
+    return 1;
+  } else {
+    printf("Failed to read GNSS location (error: %d)\n", (int)result.status);
+    return 1;
+  }
+}
+
+static int gnss_test_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  struct {
+    struct arg_lit *enable;
+    struct arg_lit *disable;
+    struct arg_end *end;
+  } args;
+
+  args.enable = arg_lit0("e", "enable", "Enable GNSS test mode");
+  args.disable = arg_lit0("d", "disable", "Disable GNSS test mode");
+  args.end = arg_end(2);
+
+  void *argtable[] = {args.enable, args.disable, args.end};
+  
+  if (arg_parse(argc, argv, argtable) != 0) {
+    arg_print_errors(stderr, args.end, "gnss_test");
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+
+  bool enable = false;
+  if (args.enable->count > 0) {
+    enable = true;
+  } else if (args.disable->count > 0) {
+    enable = false;
+  } else {
+    printf("Usage: gnss_test [-e|--enable] [-d|--disable]\n");
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+
+  printf("%s GNSS test mode...\n", enable ? "Enabling" : "Disabling");
+  auto result = g_cellularCard->gnssTestMode(enable);
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS test mode %s successfully\n", enable ? "enabled" : "disabled");
+    if (enable) {
+      printf("Test mode will stream continuous GxGSV sentences to show satellite visibility\n");
+    }
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 0;
+  } else {
+    printf("Failed to %s GNSS test mode (error: %d)\n", enable ? "enable" : "disable", (int)result);
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+}
+
+static int gnss_hotstart_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  printf("Performing GNSS hot start...\n");
+  auto result = g_cellularCard->gnssHotStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS hot start completed successfully\n");
+    printf("Hot start uses latest available data for fastest acquisition\n");
+    return 0;
+  } else {
+    printf("Failed to perform GNSS hot start (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_coldstart_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  printf("Performing GNSS cold start...\n");
+  auto result = g_cellularCard->gnssColdStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS cold start completed successfully\n");
+    printf("Cold start clears all assistance data and starts fresh acquisition\n");
+    return 0;
+  } else {
+    printf("Failed to perform GNSS cold start (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_agps_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  printf("Enabling AGPS assistance...\n");
+  auto result = g_cellularCard->gnssEnableAGPS();
+  if (result == CellReturnStatus::Ok) {
+    printf("AGPS enabled successfully\n");
+    printf("AGPS provides assistance data to speed up satellite acquisition\n");
+    return 0;
+  } else if (result == CellReturnStatus::Failed) {
+    printf("AGPS request failed - check network connection\n");
+    return 1;
+  } else {
+    printf("Failed to enable AGPS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static void register_gnss_commands() {
+  const esp_console_cmd_t gnss_init = {
+    .command = "gnss_init",
+    .help = "Initialize GNSS module",
+    .hint = NULL,
+    .func = &gnss_init_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_init));
+
+  const esp_console_cmd_t gnss_start = {
+    .command = "gnss_start",
+    .help = "Start GNSS positioning",
+    .hint = NULL,
+    .func = &gnss_start_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_start));
+
+  const esp_console_cmd_t gnss_stop = {
+    .command = "gnss_stop",
+    .help = "Stop GNSS positioning",
+    .hint = NULL,
+    .func = &gnss_stop_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_stop));
+
+  const esp_console_cmd_t gnss_location = {
+    .command = "gnss_location",
+    .help = "Get current GNSS location",
+    .hint = NULL,
+    .func = &gnss_location_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_location));
+
+  const esp_console_cmd_t gnss_test = {
+    .command = "gnss_test",
+    .help = "Enable/disable GNSS test mode",
+    .hint = "[-e|--enable] [-d|--disable]",
+    .func = &gnss_test_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_test));
+
+  const esp_console_cmd_t gnss_hotstart = {
+    .command = "gnss_hotstart",
+    .help = "Perform GNSS hot start",
+    .hint = NULL,
+    .func = &gnss_hotstart_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_hotstart));
+
+  const esp_console_cmd_t gnss_coldstart = {
+    .command = "gnss_coldstart",
+    .help = "Perform GNSS cold start",
+    .hint = NULL,
+    .func = &gnss_coldstart_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_coldstart));
+
+  const esp_console_cmd_t gnss_agps = {
+    .command = "gnss_agps",
+    .help = "Enable AGPS assistance",
+    .hint = NULL,
+    .func = &gnss_agps_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_agps));
+
+  printf("GNSS test commands registered:\n");
+  printf("  gnss_init      - Initialize GNSS module\n");
+  printf("  gnss_start     - Start GNSS positioning\n");
+  printf("  gnss_stop      - Stop GNSS positioning\n");
+  printf("  gnss_location  - Get current location\n");
+  printf("  gnss_test      - Enable/disable test mode\n");
+  printf("  gnss_hotstart  - Perform hot start\n");
+  printf("  gnss_coldstart - Perform cold start\n");
+  printf("  gnss_agps      - Enable AGPS assistance\n");
 }
