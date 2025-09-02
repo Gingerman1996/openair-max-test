@@ -70,10 +70,45 @@ static AirgradientClient *g_agClient = nullptr;
 static WiFiManager g_wifiManager;
 
 static QueueHandle_t bootButtonQueue = NULL;
+static TaskHandle_t watchdogTaskHandle = NULL;
+static volatile bool watchdogTaskActive = false;
+
 static void IRAM_ATTR bootButtonISRHandler(void *arg) {
   (void)arg;
   int level = gpio_get_level(IO_BOOT_BUTTON);
   xQueueSendFromISR(bootButtonQueue, &level, NULL);
+}
+
+/**
+ * Reset monitor external watchdog timer
+ */
+static void resetExtWatchdog() {
+  // Toggle the watchdog pin to reset external watchdog
+  gpio_set_level(IO_WDT, 0);
+  vTaskDelay(pdMS_TO_TICKS(10)); // Hold low for 10ms
+  gpio_set_level(IO_WDT, 1);
+}
+
+/**
+ * Watchdog reset task that runs in background
+ */
+static void watchdogResetTask(void *pvParameters) {
+  const TickType_t watchdog_interval = pdMS_TO_TICKS(5 * 60 * 1000); // 5 minutes
+  int reset_count = 0;
+  
+  ESP_LOGI(TAG, "Watchdog reset task started - will reset every 5 minutes");
+  
+  while (watchdogTaskActive) {
+    vTaskDelay(watchdog_interval);
+    if (watchdogTaskActive) {
+      resetExtWatchdog();
+      reset_count++;
+      ESP_LOGI(TAG, "Background watchdog reset #%d (%.1f minutes)", reset_count, reset_count * 5.0f);
+    }
+  }
+  
+  ESP_LOGI(TAG, "Watchdog reset task stopping (performed %d resets)", reset_count);
+  vTaskDelete(NULL);
 }
 
 /**
@@ -88,10 +123,14 @@ static void bootButtonTask(void *arg);
 static void initBootButton();
 
 /**
- * Reset monitor external watchdog timer
- *   with assumption GPIO already initialized before calling this function
+ * Start background watchdog reset task
  */
-static void resetExtWatchdog();
+static void startWatchdogTask();
+
+/**
+ * Stop background watchdog reset task
+ */
+static void stopWatchdogTask();
 
 /**
  * Helper to print system reset reason
@@ -314,6 +353,9 @@ extern "C" void app_main(void) {
     }
     // Turn OFF Cellular Card load switch
     gpio_set_level(EN_CE_CARD, 0);
+    
+    // Stop watchdog reset task after cellular operations complete
+    stopWatchdogTask();
   } else {
     g_wifiManager.disconnect(true);
   }
@@ -379,11 +421,46 @@ void initConsole() {
   ESP_ERROR_CHECK(esp_console_init(&console_config));
 }
 
-void resetExtWatchdog() {
-  ESP_LOGI(TAG, "Watchdog reset");
-  gpio_set_level(IO_WDT, 1);
-  vTaskDelay(pdMS_TO_TICKS(20));
-  gpio_set_level(IO_WDT, 0);
+void startWatchdogTask() {
+  if (watchdogTaskHandle != NULL) {
+    ESP_LOGW(TAG, "Watchdog task already running");
+    return;
+  }
+  
+  watchdogTaskActive = true;
+  BaseType_t result = xTaskCreate(
+    watchdogResetTask,
+    "watchdog_reset",
+    2048,
+    NULL,
+    5,  // Priority
+    &watchdogTaskHandle
+  );
+  
+  if (result == pdPASS) {
+    ESP_LOGI(TAG, "Watchdog reset task created successfully");
+  } else {
+    ESP_LOGE(TAG, "Failed to create watchdog reset task");
+    watchdogTaskActive = false;
+  }
+}
+
+void stopWatchdogTask() {
+  if (watchdogTaskHandle == NULL) {
+    ESP_LOGW(TAG, "Watchdog task not running");
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Stopping watchdog reset task...");
+  watchdogTaskActive = false;
+  
+  // Wait for task to finish
+  vTaskDelay(pdMS_TO_TICKS(100));
+  
+  // Reset handle
+  watchdogTaskHandle = NULL;
+  
+  ESP_LOGI(TAG, "Watchdog reset task stopped");
 }
 
 void initGPIO() {
@@ -633,6 +710,9 @@ bool initializeCellularNetwork(unsigned long wakeUpCounter) {
         "Give up cellular initialization on this wakeup cycle since previous attempt is failed");
     return false;
   }
+
+  // Start watchdog reset task before initializing cellular
+  startWatchdogTask();
 
   // Enable CE card power
   gpio_set_level(EN_CE_CARD, 1);
@@ -1109,32 +1189,11 @@ static int gnss_monitor_cmd(int argc, char **argv) {
 
   CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
 
-  printf("Starting GNSS 1-hour monitoring with watchdog reset every 5 minutes...\n");
-  
-  // Create a task to monitor and reset watchdog
-  TaskHandle_t watchdog_task_handle = nullptr;
-  
-  // Create watchdog management task
-  xTaskCreate([](void* pvParameters) {
-    const TickType_t watchdog_interval = pdMS_TO_TICKS(5 * 60 * 1000); // 5 minutes
-    TickType_t last_wake_time = xTaskGetTickCount();
-    
-    for (int i = 0; i < 12; i++) { // 12 iterations x 5 minutes = 60 minutes
-      vTaskDelayUntil(&last_wake_time, watchdog_interval);
-      resetExtWatchdog();
-      printf("Watchdog reset %d/12 (%.1f minutes elapsed)\n", i + 1, (i + 1) * 5.0f);
-    }
-    
-    vTaskDelete(nullptr); // Delete self when done
-  }, "gnss_watchdog", 2048, nullptr, 5, &watchdog_task_handle);
+  printf("Starting GNSS 1-hour monitoring...\n");
+  printf("Background watchdog reset task should already be running.\n");
   
   // Start the 1-hour GNSS monitoring
   auto result = a7672xx->gnssReadOneHour();
-  
-  // Clean up watchdog task if still running
-  if (watchdog_task_handle != nullptr) {
-    vTaskDelete(watchdog_task_handle);
-  }
   
   if (result == CellReturnStatus::Ok) {
     printf("GNSS 1-hour monitoring completed successfully\n");
