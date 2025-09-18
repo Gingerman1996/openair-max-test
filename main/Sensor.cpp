@@ -436,12 +436,20 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   if (_alphaSenseGasAvailable) {
     data.o3WorkingElectrode = alphaSense_->getO3WorkingElectrode();
     data.o3AuxiliaryElectrode = alphaSense_->getO3AuxiliaryElectrode();
-    data.no2WorkingElectrode = alphaSense_->getNO2WorkingElectrode();
+    // data.no2WorkingElectrode = alphaSense_->getNO2WorkingElectrode();
     data.no2AuxiliaryElectrode = alphaSense_->getNO2AuxiliaryElectrode();
+
+    //  Use differential reading for NO2
+    data.no2WorkingElectrode = alphaSense_->getNO2Differential();
+
+
     ESP_LOGD(TAG, "O3 WE: %.3fmV", data.o3WorkingElectrode);
     ESP_LOGD(TAG, "O3 AE: %.3fmV", data.o3AuxiliaryElectrode);
-    ESP_LOGD(TAG, "NO2 WE: %.3fmV", data.no2WorkingElectrode);
+    // ESP_LOGD(TAG, "NO2 WE: %.3fmV", data.no2WorkingElectrode);
     ESP_LOGD(TAG, "NO2 AE: %.3fmV", data.no2AuxiliaryElectrode);
+
+    // Use differential reading for NO2
+    ESP_LOGD(TAG, "NO2 Diff: %.3fmV", data.no2WorkingElectrode);
   }
 
   if (_alphaSenseTempAvailable) {

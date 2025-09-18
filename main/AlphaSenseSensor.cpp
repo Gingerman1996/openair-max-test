@@ -42,6 +42,10 @@ float AlphaSenseSensor::getNO2AuxiliaryElectrode() {
 
 float AlphaSenseSensor::getTemperature() { return readChannel(ads2_, ADS1115_COMP_0_GND); }
 
+float AlphaSenseSensor::getO3Differential() { return readChannel(ads1_, ADS1115_COMP_2_3); }
+
+float AlphaSenseSensor::getNO2Differential() { return readChannel(ads1_, ADS1115_COMP_0_1); }
+
 float AlphaSenseSensor::readChannel(ADS1115 *adc, ADS1115_MUX channel) {
   if (adc == nullptr) {
     ESP_LOGE(TAG, "readChannel() provided ads pointer is not valid");

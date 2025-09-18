@@ -26,6 +26,8 @@ public:
   float getNO2WorkingElectrode();
   float getNO2AuxiliaryElectrode();
   float getTemperature();
+  float getNO2Differential();
+  float getO3Differential();
 
 private:
   const char *const TAG = "AlphaSenseSensor";
