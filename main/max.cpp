@@ -6,44 +6,44 @@
  */
 
 #include <cstdint>
+#include <inttypes.h>
 #include <ratio>
 #include <stdio.h>
-#include <inttypes.h>
 #include <string>
 
-#include <fcntl.h>
 #include "airgradientOtaWifi.h"
 #include "airgradientWifiClient.h"
-#include "esp_console.h"
-#include "driver/usb_serial_jtag.h"
-#include "driver/usb_serial_jtag_vfs.h"
-#include "esp_system.h"
-#include "hal/gpio_types.h"
-#include "nvs_flash.h"
-#include "esp_err.h"
-#include "esp_timer.h"
-#include "freertos/projdefs.h"
-#include "sdkconfig.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_sleep.h"
-#include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#include "esp_console.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
+#include "freertos/task.h"
+#include "hal/gpio_types.h"
+#include "nvs_flash.h"
+#include "sdkconfig.h"
+#include <fcntl.h>
 
-#include "MaxConfig.h"
-#include "Configuration.h"
-#include "PayloadCache.h"
-#include "StatusLed.h"
-#include "Sensor.h"
 #include "AirgradientSerial.h"
 #include "AirgradientUART.h"
-#include "airgradientClient.h"
-#include "cellularModule.h"
-#include "airgradientCellularClient.h"
-#include "cellularModuleA7672xx.h"
-#include "airgradientOtaCellular.h"
+#include "Configuration.h"
+#include "MaxConfig.h"
+#include "PayloadCache.h"
+#include "Sensor.h"
+#include "StatusLed.h"
 #include "WiFiManager.h"
+#include "airgradientCellularClient.h"
+#include "airgradientClient.h"
+#include "airgradientOtaCellular.h"
+#include "cellularModule.h"
+#include "cellularModuleA7672xx.h"
 
 #define CONSOLE_MAX_CMDLINE_ARGS 8
 #define CONSOLE_MAX_CMDLINE_LENGTH 256
@@ -52,8 +52,9 @@
 // Wake up counter that saved on Low Power memory
 RTC_DATA_ATTR unsigned long xWakeUpCounter = 0;
 
-// Hold the index of measures queue on which http post should start send measures
-// eg. xHttpCacheQueueIndex = 3, then for [q1, q2, q3, q4, q5, q6] should only send q4, q5, q6
+// Hold the index of measures queue on which http post should start send
+// measures eg. xHttpCacheQueueIndex = 3, then for [q1, q2, q3, q4, q5, q6]
+// should only send q4, q5, q6
 RTC_DATA_ATTR unsigned long xHttpCacheQueueIndex = 0;
 
 // Global Vars
@@ -122,10 +123,13 @@ static bool initializeCellularNetwork(unsigned long wakeUpCounter);
 
 static bool checkRemoteConfiguration(unsigned long wakeUpCounter);
 static bool checkForFirmwareUpdate(unsigned long wakeUpCounter);
-static bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache);
-static bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
-                               AirgradientClient::MaxSensorPayload sensorPayload);
-static bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCache);
+static bool sendMeasuresByCellular(unsigned long wakeUpCounter,
+                                   PayloadCache &payloadCache);
+static bool
+sendMeasuresByWiFi(unsigned long wakeUpCounter,
+                   AirgradientClient::MaxSensorPayload sensorPayload);
+static bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter,
+                                  PayloadCache &payloadCache);
 
 extern "C" void app_main(void) {
   // Re-initialize console for logging only if it just wake up after deepsleep
@@ -150,7 +154,8 @@ extern "C" void app_main(void) {
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
-  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+  if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+      ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     ret = nvs_flash_init();
   }
@@ -228,41 +233,20 @@ extern "C" void app_main(void) {
       esp_restart();
     }
 
-    // No need to restart for wifi mode, just continue because its already successfuly connect
+    // No need to restart for wifi mode, just continue because its already
+    // successfuly connect
     config.networkOption = NetworkOption::WiFi;
     config.isWifiConfigured = true;
     g_configuration.set(config);
 
     // Wifi is ready from the start
     g_networkReady = true;
-    // Starting time for every cycle should start now because time taken by system settings portal
+    // Starting time for every cycle should start now because time taken by
+    // system settings portal
     wakeUpMillis = MILLIS();
   }
 
-   resetExtWatchdog();
-  ////////////////////////////////////////
-  // Reset external WDT
-
-
-   // Calculate how long to sleep to keep measurement cycle the same
-  uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
-  int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
-  if (toSleepMs < 0) {
-    // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
-    toSleepMs = 0;
-  }
-  ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
-  esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
-  vTaskDelay(pdMS_TO_TICKS(1000));
-
-  // Prepare IIC Serial for sleep
-  // sensor.prepareSleep();
-
-  g_statusLed.off();
-
-  esp_deep_sleep_start();
-//////////////////////////////////////////////////////
-
+  resetExtWatchdog();
 
   ESP_LOGI(TAG, "Wait for sensors to warmup before initialization");
   vTaskDelay(pdMS_TO_TICKS(2000));
@@ -288,21 +272,23 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
   Sensor sensor(bus_handle);
-  if (sensor.init(g_configuration.getModel(), g_configuration.getABCDays()) == false) {
+  if (sensor.init(g_configuration.getModel(), g_configuration.getABCDays()) ==
+      false) {
     g_statusLed.blinkAsync(2000, 500);
-    ESP_LOGW(
-        TAG,
-        "One or more sensor were failed to initialize, will not measure those on this iteration");
+    ESP_LOGW(TAG, "One or more sensor were failed to initialize, will not "
+                  "measure those on this iteration");
   }
-  
 
   if (g_configuration.isCO2CalibrationRequested()) {
     sensor.co2AttemptManualCalibration();
     g_configuration.resetCO2CalibrationRequest();
+
+    sensor.no2Calibration();
   }
 
   // Start measure sensor sequence
-  sensor.startMeasures(DEFAULT_MEASURE_ITERATION_COUNT, DEFAULT_MEASURE_INTERVAL_MS_PER_ITERATION);
+  sensor.startMeasures(DEFAULT_MEASURE_ITERATION_COUNT,
+                       DEFAULT_MEASURE_INTERVAL_MS_PER_ITERATION);
   sensor.printMeasures();
   auto averageMeasures = sensor.getLastAverageMeasure();
 
@@ -313,11 +299,12 @@ extern "C" void app_main(void) {
 
   // Optimization: copy from LP memory so will not always call from LP memory
   int wakeUpCounter = xWakeUpCounter;
-
+ 
   if (g_configuration.getNetworkOption() == NetworkOption::Cellular) {
     // Attempt send post through HTTP first
-    // If success and send measures through MQTT not enabled, then clean the cache while make sure xHttpCacheQueueIndex reset
-    // Attempt send measures through MQTT if its enabled
+    // If success and send measures through MQTT not enabled, then clean the
+    // cache while make sure xHttpCacheQueueIndex reset Attempt send measures
+    // through MQTT if its enabled
     PayloadCache payloadCache(MAX_PAYLOAD_CACHE);
     payloadCache.push(&averageMeasures);
     bool success = sendMeasuresByCellular(wakeUpCounter, payloadCache);
@@ -354,27 +341,25 @@ extern "C" void app_main(void) {
     g_wifiManager.disconnect(true);
   }
 
-  // Reset external watchdog before sleep to make sure its not trigger while in sleep
+  // Reset external watchdog before sleep to make sure its not trigger while in
+  // sleep
   //   before system wakeup
   resetExtWatchdog();
 
   // Calculate how long to sleep to keep measurement cycle the same
-  // uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
-  // int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
-  // if (toSleepMs < 0) {
-  //   // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
-  //   toSleepMs = 0;
-  // }
-  // ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
-  // esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
-  // vTaskDelay(pdMS_TO_TICKS(1000));
+  uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
+  int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
+  if (toSleepMs < 0) {
+    // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
+    toSleepMs = 0;
+  }
+  ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
+  esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
+  vTaskDelay(pdMS_TO_TICKS(1000));
 
-  // // Prepare IIC Serial for sleep
-  // sensor.prepareSleep();
+  g_statusLed.off();
 
-  // g_statusLed.off();
-
-  // esp_deep_sleep_start();
+  esp_deep_sleep_start();
 
   // Will never go here
 
@@ -409,10 +394,11 @@ void initConsole() {
   usb_serial_jtag_vfs_use_driver();
 
   /* Initialize the console */
-  esp_console_config_t console_config = {.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
-                                         .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
+  esp_console_config_t console_config = {
+      .max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
+      .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
 #if CONFIG_LOG_COLORS
-                                         .hint_color = atoi(LOG_COLOR_CYAN)
+      .hint_color = atoi(LOG_COLOR_CYAN)
 #endif
   };
   ESP_ERROR_CHECK(esp_console_init(&console_config));
@@ -433,12 +419,13 @@ void initGPIO() {
   io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
   io_conf.intr_type = GPIO_INTR_DISABLE;
   if (xWakeUpCounter == 0) {
-    io_conf.pin_bit_mask = (1ULL << IO_WDT) | (1ULL << EN_PMS1) | (1ULL << EN_PMS2) |
-                           (1ULL << EN_CO2) | (1ULL << EN_CE_CARD) | (1ULL << EN_ALPHASENSE);
+    io_conf.pin_bit_mask = (1ULL << IO_WDT) | (1ULL << EN_PMS1) |
+                           (1ULL << EN_PMS2) | (1ULL << EN_CO2) |
+                           (1ULL << EN_CE_CARD) | (1ULL << EN_ALPHASENSE);
   } else {
     // Ignore CO2 and Alphasense load switch IO since the state already retained
-    io_conf.pin_bit_mask =
-        (1ULL << IO_WDT) | (1ULL << EN_PMS1) | (1ULL << EN_PMS2) | (1ULL << EN_CE_CARD);
+    io_conf.pin_bit_mask = (1ULL << IO_WDT) | (1ULL << EN_PMS1) |
+                           (1ULL << EN_PMS2) | (1ULL << EN_CE_CARD);
   }
   gpio_config(&io_conf);
 
@@ -457,8 +444,9 @@ void initGPIO() {
   gpio_set_level(EN_CE_CARD, 0);
 
   if (xWakeUpCounter == 0) {
-    // Directly enable CO2 and AlphaSense load switch and hold the state only when first boot
-    // gpio_hold_en will retain the GPIO state on every sleep cycle even when system reset
+    // Directly enable CO2 and AlphaSense load switch and hold the state only
+    // when first boot gpio_hold_en will retain the GPIO state on every sleep
+    // cycle even when system reset
     gpio_set_level(EN_CO2, 1);
     gpio_set_level(EN_ALPHASENSE, 1);
     gpio_hold_en(EN_CO2);
@@ -478,7 +466,8 @@ void bootButtonTask(void *arg) {
       }
       // Button released
 
-      if ((MILLIS() - startTimeButtonPressed) > 3000 && startTimeButtonPressed != 0) {
+      if ((MILLIS() - startTimeButtonPressed) > 3000 &&
+          startTimeButtonPressed != 0) {
         bool currentState = g_configuration.runSystemSettings();
         g_configuration.setRunSystemSettings(!currentState);
         ESP_LOGI(TAG, "Restarting in 2s...");
@@ -498,14 +487,14 @@ void initBootButton() {
   io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
   gpio_config(&io_conf);
 
-  //create a queue to handle gpio event from isr
+  // create a queue to handle gpio event from isr
   bootButtonQueue = xQueueCreate(3, sizeof(uint32_t));
-  //start gpio task
+  // start gpio task
   xTaskCreate(bootButtonTask, "boot_button", 2048, NULL, 10, NULL);
 
-  //install gpio isr service
+  // install gpio isr service
   gpio_install_isr_service(0);
-  //hook isr handler for specific gpio pin
+  // hook isr handler for specific gpio pin
   gpio_isr_handler_add(IO_BOOT_BUTTON, bootButtonISRHandler, nullptr);
 }
 
@@ -580,8 +569,9 @@ std::string buildSerialNumber() {
   }
 
   char result[13] = {0};
-  snprintf(result, sizeof(result), "%02x%02x%02x%02x%02x%02x", mac_address[0], mac_address[1],
-           mac_address[2], mac_address[3], mac_address[4], mac_address[5]);
+  snprintf(result, sizeof(result), "%02x%02x%02x%02x%02x%02x", mac_address[0],
+           mac_address[1], mac_address[2], mac_address[3], mac_address[4],
+           mac_address[5]);
   std::string sn = std::string(result);
 
   return sn;
@@ -666,10 +656,10 @@ bool initializeNetwork(unsigned long wakeUpCounter) {
 }
 
 bool initializeCellularNetwork(unsigned long wakeUpCounter) {
-  if (g_ceAgSerial != nullptr || g_cellularCard != nullptr || g_agClient != nullptr) {
-    ESP_LOGW(
-        TAG,
-        "Give up cellular initialization on this wakeup cycle since previous attempt is failed");
+  if (g_ceAgSerial != nullptr || g_cellularCard != nullptr ||
+      g_agClient != nullptr) {
+    ESP_LOGW(TAG, "Give up cellular initialization on this wakeup cycle since "
+                  "previous attempt is failed");
     return false;
   }
 
@@ -685,8 +675,8 @@ bool initializeCellularNetwork(unsigned long wakeUpCounter) {
   }
 
   g_ceAgSerial = new AirgradientUART();
-  if (!g_ceAgSerial->begin(UART_BAUD_PORT_CE_CARD, UART_BAUD_CE_CARD, UART_RX_CE_CARD,
-                           UART_TX_CE_CARD)) {
+  if (!g_ceAgSerial->begin(UART_BAUD_PORT_CE_CARD, UART_BAUD_CE_CARD,
+                           UART_RX_CE_CARD, UART_TX_CE_CARD)) {
     ESP_LOGI(TAG, "Failed initialize serial communication for cellular card");
     g_statusLed.blink(5000, 400);
     // TODO: maybe restart here?
@@ -741,9 +731,11 @@ bool initializeWiFiNetwork(unsigned long wakeUpCounter) {
   return true;
 }
 
-bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache) {
+bool sendMeasuresByCellular(unsigned long wakeUpCounter,
+                            PayloadCache &payloadCache) {
   // Check if pass criteria to post measures
-  if (wakeUpCounter != 0 && (wakeUpCounter % TRANSMIT_MEASUREMENTS_CYCLES) > 0) {
+  if (wakeUpCounter != 0 &&
+      (wakeUpCounter % TRANSMIT_MEASUREMENTS_CYCLES) > 0) {
     ESP_LOGI(TAG, "Not the time to post measures by cellular network, skip");
     return false;
   }
@@ -801,10 +793,12 @@ bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCa
     if (g_agClient->isClientReady() == false) {
       // Client is not ready,
       g_statusLed.blinkAsync(3000, 500); // Run failed post led indicator
-      ESP_LOGE(TAG, "Send measures failed because of client is not ready, ensuring connection...");
+      ESP_LOGE(TAG, "Send measures failed because of client is not ready, "
+                    "ensuring connection...");
       g_ceAgSerial->setDebug(true);
       if (g_agClient->ensureClientConnection(true) == false) {
-        ESP_LOGE(TAG, "Failed ensuring client connection, system restart in 5s");
+        ESP_LOGE(TAG,
+                 "Failed ensuring client connection, system restart in 5s");
         g_statusLed.blink(5000, 500);
         esp_restart();
       }
@@ -816,19 +810,25 @@ bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCa
     }
 
     if (g_agClient->isRegisteredOnAgServer() == false) {
-      // TODO: What to do here? maybe just add new led indicator and never restart until user restart it manually
+      // TODO: What to do here? maybe just add new led indicator and never
+      // restart until user restart it manually
     }
 
-    ESP_LOGW(TAG, "Send measures failed because of server issue, retry in next schedule");
+    ESP_LOGW(
+        TAG,
+        "Send measures failed because of server issue, retry in next schedule");
     // Run failed post led indicator because of server issue
     g_statusLed.blink(4000, 500);
     break;
 
   } while (attemptCounter < 3 && !postSuccess);
 
-  // Check if still first boot, client is not ready and after 3 attempts is still failed post measures
-  if (wakeUpCounter == 0 && !postSuccess && g_agClient->isClientReady() == false) {
-    ESP_LOGE(TAG, "Give up after 3 attempts of failed post measures because of network reasons, "
+  // Check if still first boot, client is not ready and after 3 attempts is
+  // still failed post measures
+  if (wakeUpCounter == 0 && !postSuccess &&
+      g_agClient->isClientReady() == false) {
+    ESP_LOGE(TAG, "Give up after 3 attempts of failed post measures because of "
+                  "network reasons, "
                   "restart systems in 6s");
     g_statusLed.blink(6000, 500);
     esp_restart();
@@ -870,7 +870,8 @@ bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
   return true;
 }
 
-bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCache) {
+bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter,
+                           PayloadCache &payloadCache) {
   // Sanity check if MQTT is enabled
   std::string uri = g_configuration.getMqttBrokerUrl();
   if (uri.empty()) {
@@ -878,7 +879,8 @@ bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCac
   }
 
   // Sanity check if its time to send measures
-  if (wakeUpCounter != 0 && (wakeUpCounter % TRANSMIT_MEASUREMENTS_CYCLES) > 0) {
+  if (wakeUpCounter != 0 &&
+      (wakeUpCounter % TRANSMIT_MEASUREMENTS_CYCLES) > 0) {
     ESP_LOGI(TAG, "Not the time to post measures by cellular network, skip");
     return false;
   }
@@ -890,9 +892,8 @@ bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCac
   }
 
   if (g_agClient->mqttConnect(uri.c_str()) == false) {
-    ESP_LOGE(
-        TAG,
-        "Skip send measures through MQTT, failed to connect. Will retry publish on next schedule");
+    ESP_LOGE(TAG, "Skip send measures through MQTT, failed to connect. Will "
+                  "retry publish on next schedule");
     // Please see comment on mqttPublishMeasures below on why set the cache
     xHttpCacheQueueIndex = payloadCache.getSize();
     return false;
@@ -915,9 +916,11 @@ bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCac
   ESP_LOGI(TAG, "Signal strength: %d", payload.signal);
 
   // When success, clean the cache (because already send to both HTTP and MQTT)
-  //  and also reset xHttpCacheQueueIndex to make sure post through both HTTP and MQTT start fresh
+  //  and also reset xHttpCacheQueueIndex to make sure post through both HTTP
+  //  and MQTT start fresh
   // But if failed, since HTTP already send all the measures on cache,
-  //  set xHttpCacheQueueIndex to the cache current size as the start index of which HTTP post measures from queue
+  //  set xHttpCacheQueueIndex to the cache current size as the start index of
+  //  which HTTP post measures from queue
   bool success = g_agClient->mqttPublishMeasures(payload);
   if (success) {
     payloadCache.clean();
@@ -934,13 +937,15 @@ bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCac
 }
 
 bool checkForFirmwareUpdate(unsigned long wakeUpCounter) {
-  if (wakeUpCounter != 0 && (wakeUpCounter % FIRMWARE_UPDATE_CHECK_CYCLES) > 0) {
+  if (wakeUpCounter != 0 &&
+      (wakeUpCounter % FIRMWARE_UPDATE_CHECK_CYCLES) > 0) {
     ESP_LOGI(TAG, "Not the time to check firmware update, skip");
     return true;
   }
 
   if (!initializeNetwork(wakeUpCounter)) {
-    ESP_LOGI(TAG, "Cannot connect to cellular network, skip check firmware update");
+    ESP_LOGI(TAG,
+             "Cannot connect to cellular network, skip check firmware update");
     return false;
   }
 
@@ -975,7 +980,8 @@ bool checkForFirmwareUpdate(unsigned long wakeUpCounter) {
 }
 
 bool checkRemoteConfiguration(unsigned long wakeUpCounter) {
-  if (wakeUpCounter != 0 && (wakeUpCounter % FIRMWARE_UPDATE_CHECK_CYCLES) > 0) {
+  if (wakeUpCounter != 0 &&
+      (wakeUpCounter % FIRMWARE_UPDATE_CHECK_CYCLES) > 0) {
     ESP_LOGI(TAG, "Not the time to check remote configuration, skip");
     return true;
   }
@@ -1001,7 +1007,9 @@ bool checkRemoteConfiguration(unsigned long wakeUpCounter) {
   }
 
   if (g_configuration.isConfigChanged()) {
-    ESP_LOGI(TAG, "Changed configuration will be applied on next wakeup cycle onwards");
+    ESP_LOGI(
+        TAG,
+        "Changed configuration will be applied on next wakeup cycle onwards");
   }
 
   return true;

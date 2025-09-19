@@ -12,13 +12,21 @@
 #include "BQ25672.h"
 #include "MaxConfig.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_log_level.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include <cmath>
+
+namespace {
+constexpr char NO2_CAL_NVS_NAMESPACE[] = "no2-cal";
+constexpr char NO2_CAL_SENS_KEY[] = "sens";
+constexpr float NO2_DIFF_MIN_THRESHOLD = 1e-6f;
+}
 
 // RTC memory variable to store CO2 measurement samples configuration status
 RTC_DATA_ATTR static uint8_t rtc_samples_configured = 0;
@@ -121,6 +129,10 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
     ESP_LOGI(TAG, "Skip O3/NO2 sensor, not supported on this model");
     _alphaSenseGasAvailable = false;
     _alphaSenseTempAvailable = false;
+  }
+
+  if (_alphaSenseGasAvailable) {
+    _loadNo2Calibration();
   }
 
   // PMS 1
@@ -295,6 +307,37 @@ bool Sensor::co2AttemptManualCalibration() {
   return true;
 }
 
+void Sensor::no2Calibration() {
+  ESP_LOGI(TAG, "Starting NO2 sensor calibration...");
+  if (_alphaSenseGasAvailable) {
+    float latestDiff = 0.0f;
+    for (int i = 0; i < 30; i++) {
+      latestDiff = alphaSense_->getNO2Differential();
+      ESP_LOGI(TAG, "NO2 Diff: %.3fmV", latestDiff);
+      ESP_LOGI(TAG, "Iteration NO2 reading: %d", i);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    if (std::fabs(latestDiff) < NO2_DIFF_MIN_THRESHOLD) {
+      ESP_LOGE(TAG, "NO2 differential too small, abort calibration");
+      return;
+    }
+
+    _no2Sensitivity = (_no2Baseline - _no2Offset) / latestDiff;
+    if (_saveNo2Calibration()) {
+      _no2CalibrationLoaded = true;
+      ESP_LOGI(TAG, "NO2 Sensitivity stored: %.3f", _no2Sensitivity);
+    } else {
+      ESP_LOGW(TAG, "NO2 Sensitivity calculated but not saved to NVS");
+    }
+
+    ESP_LOGI(TAG, "NO2 sensor calibration completed.");
+  }
+  else {
+    ESP_LOGE(TAG, "NO2 sensor not available, cannot perform calibration.");
+  }
+}
+
 void Sensor::prepareSleep() {
   if (_pms1Available && agsPM1_ != nullptr) {
     ESP_LOGI(TAG, "Prepare PMS1 for sleep");
@@ -451,17 +494,26 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     // data.no2WorkingElectrode = alphaSense_->getNO2WorkingElectrode();
     data.no2AuxiliaryElectrode = alphaSense_->getNO2AuxiliaryElectrode();
 
-    //  Use differential reading for NO2
-    data.no2WorkingElectrode = alphaSense_->getNO2Differential();
+    // //  Use differential reading for NO2
+    // data.no2WorkingElectrode = alphaSense_->getNO2Differential();
+
+    float no2Differential = alphaSense_->getNO2Differential();
+    if (_no2CalibrationLoaded) {
+      data.no2WorkingElectrode = (no2Differential * _no2Sensitivity) + _no2Offset;
+    } else {
+      data.no2WorkingElectrode = no2Differential;
+    }
 
 
     ESP_LOGD(TAG, "O3 WE: %.3fmV", data.o3WorkingElectrode);
     ESP_LOGD(TAG, "O3 AE: %.3fmV", data.o3AuxiliaryElectrode);
-    // ESP_LOGD(TAG, "NO2 WE: %.3fmV", data.no2WorkingElectrode);
     ESP_LOGD(TAG, "NO2 AE: %.3fmV", data.no2AuxiliaryElectrode);
 
-    // Use differential reading for NO2
-    ESP_LOGD(TAG, "NO2 Diff: %.3fmV", data.no2WorkingElectrode);
+    if (_no2CalibrationLoaded) {
+      ESP_LOGD(TAG, "NO2 Concentration: %.3fppb", data.no2WorkingElectrode);
+    } else {
+      ESP_LOGD(TAG, "NO2 Diff (uncalibrated): %.3fmV", data.no2WorkingElectrode);
+    }
   }
 
   if (_alphaSenseTempAvailable) {
@@ -728,6 +780,56 @@ bool Sensor::_applySunlightMeasurementSample() {
   } while (co2_reading <= 0);
 
   return true;
+}
+
+bool Sensor::_loadNo2Calibration() {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(NO2_CAL_NVS_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGI(TAG, "NO2 calibration not found in NVS (%s)", esp_err_to_name(err));
+    return false;
+  }
+
+  float storedSensitivity = 0.0f;
+  size_t size = sizeof(storedSensitivity);
+  err = nvs_get_blob(handle, NO2_CAL_SENS_KEY, &storedSensitivity, &size);
+  nvs_close(handle);
+
+  if (err == ESP_OK && size == sizeof(storedSensitivity)) {
+    _no2Sensitivity = storedSensitivity;
+    _no2CalibrationLoaded = true;
+    ESP_LOGI(TAG, "Loaded NO2 sensitivity: %.3f", _no2Sensitivity);
+    return true;
+  }
+
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "NO2 sensitivity not stored yet");
+  } else {
+    ESP_LOGW(TAG, "Failed to load NO2 sensitivity: %s", esp_err_to_name(err));
+  }
+  return false;
+}
+
+bool Sensor::_saveNo2Calibration() {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(NO2_CAL_NVS_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to open NVS for NO2 calibration: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  err = nvs_set_blob(handle, NO2_CAL_SENS_KEY, &_no2Sensitivity, sizeof(_no2Sensitivity));
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+  nvs_close(handle);
+
+  if (err == ESP_OK) {
+    return true;
+  }
+
+  ESP_LOGE(TAG, "Failed to save NO2 sensitivity: %s", esp_err_to_name(err));
+  return false;
 }
 
 void Sensor::_calculateMeasuresAverage() {

@@ -30,6 +30,9 @@ public:
   bool co2AttemptManualCalibration();
   void prepareSleep();
 
+  //AlphaSense Calibration functions
+  void no2Calibration();
+
 private:
   const char *const TAG = "Sensor";
 
@@ -38,6 +41,8 @@ private:
   void _calculateMeasuresAverage();
   void _warmUpSensor();
   bool _applySunlightMeasurementSample();
+  bool _loadNo2Calibration();
+  bool _saveNo2Calibration();
 
   int _rco2IterationOkCount = 0;
   int _atmpIterationOkCount = 0;
@@ -55,6 +60,15 @@ private:
   int _no2WEIterationOkCount = 0;
   int _no2AEIterationOkCount = 0;
   int _afeTempIterationOkCount = 0;
+
+  //AlphaSense Calibration constants
+  float _no2Sensitivity = 0.0f;
+  const int _no2Offset = 4;
+  const float _no2Baseline = 0.0f;
+  bool _no2CalibrationLoaded = false;
+
+  ////////////////////////////////////////////
+
   AirgradientClient::MaxSensorPayload _averageMeasure;
   i2c_master_bus_handle_t _busHandle;
 
