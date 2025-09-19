@@ -295,6 +295,18 @@ bool Sensor::co2AttemptManualCalibration() {
   return true;
 }
 
+void Sensor::prepareSleep() {
+  if (_pms1Available && agsPM1_ != nullptr) {
+    ESP_LOGI(TAG, "Prepare PMS1 for sleep");
+    agsPM1_->prepareSleep();
+  }
+
+  if (_pms2Available && agsPM2_ != nullptr) {
+    ESP_LOGI(TAG, "Prepare PMS2 for sleep");
+    agsPM2_->prepareSleep();
+  }
+}
+
 void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   // Set measure data to invalid for indication if respective sensor failed
   data.rco2 = DEFAULT_INVALID_CO2;

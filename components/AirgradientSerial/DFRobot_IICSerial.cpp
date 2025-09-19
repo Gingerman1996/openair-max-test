@@ -574,11 +574,62 @@ bool DFRobot_IICSerial::isChannelInSleep(uint8_t subUartChannel) {
 }
 
 void DFRobot_IICSerial::prepareSleep() {
-  sScrReg_t scr = {.rxEn = 0x00, .txEn = 0x00, .sleepEn = 0x01, .rsv = 0x00};
-  subSerialRegConfig(REG_WK2132_SCR, &scr);
+  // SCR register is located in PAGE0
+  subSerialPageSwitch(page0);
+
+  uint8_t scr = 0;
+  if (readReg(REG_WK2132_SCR, &scr, 1) != 1) {
+    ESP_LOGW(TAG, "prepareSleep(): failed to read SCR register");
+    return;
+  }
+
+  // Clear RX/TX enable bits then enable sleep bit
+  scr &= ~(0x03);   // clear rxEn / txEn
+  scr |= 0x04;      // set sleepEn
+
+  writeReg(REG_WK2132_SCR, &scr, 1);
 }
 
-void DFRobot_IICSerial::sleep() {}
+void DFRobot_IICSerial::sleep() {
+  subSerialPageSwitch(page0);
+
+  const TickType_t startTick = xTaskGetTickCount();
+  sFsrReg_t fsr = readFIFOStateReg();
+  while ((fsr.tBusy || fsr.rDat) && (xTaskGetTickCount() - startTick) < pdMS_TO_TICKS(50)) {
+    if (fsr.rDat) {
+      uint8_t discard;
+      readReg(REG_WK2132_FDAT, &discard, 1);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+    fsr = readFIFOStateReg();
+  }
+
+  if (fsr.tBusy || fsr.rDat) {
+    ESP_LOGW(TAG, "sleep(): FIFO still busy (tBusy=%d rDat=%d)", fsr.tBusy, fsr.rDat);
+  }
+
+  uint8_t scr = 0;
+  if (readReg(REG_WK2132_SCR, &scr, 1) == 1) {
+    scr &= ~(0x03);
+    scr |= 0x04;
+    writeReg(REG_WK2132_SCR, &scr, 1);
+  } else {
+    ESP_LOGW(TAG, "sleep(): failed to read SCR register");
+  }
+
+  uint8_t val = 0;
+  if (readReg(REG_WK2132_GRST, &val, 1) != 1) {
+    ESP_LOGW(TAG, "sleep(): failed to read GRST register");
+    return;
+  }
+  if (_subSerialChannel == SUBUART_CHANNEL_1) {
+    val |= 0x10;
+  } else {
+    val |= 0x20;
+  }
+  writeReg(REG_WK2132_GRST, &val, 1);
+}
+
 
 void DFRobot_IICSerial::wakeup() {}
 

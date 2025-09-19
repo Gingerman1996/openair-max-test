@@ -341,6 +341,10 @@ public:
   bool isChannelInSleep(uint8_t subUartChannel);
   void printAllRegsForCurrentCh();
   void prepareSleep();
+  /**
+   * @brief Put sub UART into WK2132 sleep mode
+   */
+  void sleep();
   void turnOffClock();
 
 protected:
@@ -438,12 +442,6 @@ protected:
    * @return Return the switched channel
    */
   uint8_t subSerialChnnlSwitch(uint8_t subUartChannel);
-
-  /**
-   * @fn sleep
-   * @brief Sub UART enters sleep state
-   */
-  void sleep();
 
   /**
    * @fn wakeup

@@ -25,6 +25,7 @@ public:
   virtual void print(const char *str);
   virtual int write(const uint8_t *data, int len);
   virtual int read();
+  virtual void prepareSleep();
   void setDebug(bool debug);
 
 protected:

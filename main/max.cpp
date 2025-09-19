@@ -239,8 +239,30 @@ extern "C" void app_main(void) {
     wakeUpMillis = MILLIS();
   }
 
+   resetExtWatchdog();
+  ////////////////////////////////////////
   // Reset external WDT
-  resetExtWatchdog();
+
+
+   // Calculate how long to sleep to keep measurement cycle the same
+  uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
+  int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
+  if (toSleepMs < 0) {
+    // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
+    toSleepMs = 0;
+  }
+  ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
+  esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  // Prepare IIC Serial for sleep
+  // sensor.prepareSleep();
+
+  g_statusLed.off();
+
+  esp_deep_sleep_start();
+//////////////////////////////////////////////////////
+
 
   ESP_LOGI(TAG, "Wait for sensors to warmup before initialization");
   vTaskDelay(pdMS_TO_TICKS(2000));
@@ -260,6 +282,7 @@ extern "C" void app_main(void) {
       .glitch_ignore_cnt = 7,
       // .flags.enable_internal_pullup = true,
   };
+
   bus_cfg.flags.enable_internal_pullup = true;
   i2c_master_bus_handle_t bus_handle;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
@@ -271,6 +294,7 @@ extern "C" void app_main(void) {
         TAG,
         "One or more sensor were failed to initialize, will not measure those on this iteration");
   }
+  
 
   if (g_configuration.isCO2CalibrationRequested()) {
     sensor.co2AttemptManualCalibration();
@@ -335,19 +359,22 @@ extern "C" void app_main(void) {
   resetExtWatchdog();
 
   // Calculate how long to sleep to keep measurement cycle the same
-  uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
-  int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
-  if (toSleepMs < 0) {
-    // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
-    toSleepMs = 0;
-  }
-  ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
-  esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  // uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
+  // int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
+  // if (toSleepMs < 0) {
+  //   // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
+  //   toSleepMs = 0;
+  // }
+  // ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
+  // esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
+  // vTaskDelay(pdMS_TO_TICKS(1000));
 
-  g_statusLed.off();
+  // // Prepare IIC Serial for sleep
+  // sensor.prepareSleep();
 
-  esp_deep_sleep_start();
+  // g_statusLed.off();
+
+  // esp_deep_sleep_start();
 
   // Will never go here
 

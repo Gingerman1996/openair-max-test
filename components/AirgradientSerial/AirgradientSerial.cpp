@@ -20,4 +20,6 @@ int AirgradientSerial::write(const uint8_t *data, int len) { return 0; }
 
 int AirgradientSerial::read() { return -1; }
 
+void AirgradientSerial::prepareSleep() {}
+
 void AirgradientSerial::setDebug(bool debug) { isDebug = debug; }

@@ -26,9 +26,11 @@ public:
   void print(const char *str);
   int write(const uint8_t *data, int len);
   int read();
+  void prepareSleep() override;
 
 private:
   DFRobot_IICSerial _iicSerial;
+  uint8_t _subUartChannel;
   gpio_num_t _iicResetIO = GPIO_NUM_NC;
 };
 

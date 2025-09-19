@@ -8,7 +8,7 @@
 
 AirgradientIICSerial::AirgradientIICSerial(i2c_master_bus_handle_t i2c_bus_handle,
                                            uint8_t subUartChannel, uint8_t IA1, uint8_t IA0)
-    : _iicSerial(i2c_bus_handle, subUartChannel, IA1, IA0) {}
+    : _iicSerial(i2c_bus_handle, subUartChannel, IA1, IA0), _subUartChannel(subUartChannel) {}
 
 bool AirgradientIICSerial::begin(int baud) { return begin(baud, -1); }
 
@@ -101,4 +101,13 @@ int AirgradientIICSerial::read() {
   }
 
   return _iicSerial.read();
+}
+
+void AirgradientIICSerial::prepareSleep() {
+  _iicSerial.prepareSleep();
+  ESP_LOGD(TAG, "Prepare IICSerial for sleep");
+  _iicSerial.sleep();
+  bool inSleep = _iicSerial.isChannelInSleep(_subUartChannel);
+  ESP_LOGD(TAG, "WK2132 channel %u sleep=%s", _subUartChannel,
+           inSleep ? "true" : "false");
 }
