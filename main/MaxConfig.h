@@ -56,6 +56,9 @@ constexpr gpio_num_t IO_BOOT_BUTTON = GPIO_NUM_9;
 #define DEFAULT_INVALID_NOX -1
 #define DEFAULT_INVALID_VOLT -1
 
+// Set to 0 to publish raw millivolt readings instead of calibrated concentration
+#define NO2_WE_OUTPUT_USE_CONCENTRATION 0
+
 #define IS_PM_VALID(val) (val >= 0)
 #define IS_TEMPERATURE_VALID(val) ((val >= -40) && (val <= 125))
 #define IS_HUMIDITY_VALID(val) ((val >= 0) && (val <= 100))

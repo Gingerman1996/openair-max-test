@@ -63,8 +63,8 @@ private:
 
   //AlphaSense Calibration constants
   float _no2Sensitivity = 0.0f;
-  const int _no2Offset = 4;
-  const float _no2Baseline = 0.0f;
+  const int _no2Offset = 3;
+  const float _no2Baseline = 5.0f;
   bool _no2CalibrationLoaded = false;
 
   ////////////////////////////////////////////

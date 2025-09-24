@@ -259,7 +259,15 @@ void Sensor::printMeasures() {
   ESP_LOGI(TAG, "VPanel : %.2f", _averageMeasure.vPanel);
   ESP_LOGI(TAG, "O3 WE: %.3fmV", _averageMeasure.o3WorkingElectrode);
   ESP_LOGI(TAG, "O3 AE: %.3fmV", _averageMeasure.o3AuxiliaryElectrode);
+#if NO2_WE_OUTPUT_USE_CONCENTRATION
+  if (_no2CalibrationLoaded) {
+    ESP_LOGI(TAG, "NO2 Concentration: %.3fppb", _averageMeasure.no2WorkingElectrode);
+  } else {
+    ESP_LOGI(TAG, "NO2 Diff: %.3fmV", _averageMeasure.no2WorkingElectrode);
+  }
+#else
   ESP_LOGI(TAG, "NO2 WE: %.3fmV", _averageMeasure.no2WorkingElectrode);
+#endif
   ESP_LOGI(TAG, "NO2 AE: %.3fmV", _averageMeasure.no2AuxiliaryElectrode);
   ESP_LOGI(TAG, "AFE Temperature: %.3fmV", _averageMeasure.afeTemp);
 }
@@ -491,18 +499,18 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   if (_alphaSenseGasAvailable) {
     data.o3WorkingElectrode = alphaSense_->getO3WorkingElectrode();
     data.o3AuxiliaryElectrode = alphaSense_->getO3AuxiliaryElectrode();
-    // data.no2WorkingElectrode = alphaSense_->getNO2WorkingElectrode();
     data.no2AuxiliaryElectrode = alphaSense_->getNO2AuxiliaryElectrode();
 
-    // //  Use differential reading for NO2
-    // data.no2WorkingElectrode = alphaSense_->getNO2Differential();
-
+#if NO2_WE_OUTPUT_USE_CONCENTRATION
     float no2Differential = alphaSense_->getNO2Differential();
     if (_no2CalibrationLoaded) {
       data.no2WorkingElectrode = (no2Differential * _no2Sensitivity) + _no2Offset;
     } else {
       data.no2WorkingElectrode = no2Differential;
     }
+#else
+    data.no2WorkingElectrode = alphaSense_->getNO2WorkingElectrode();
+#endif
 
 
     ESP_LOGD(TAG, "O3 WE: %.3fmV", data.o3WorkingElectrode);
@@ -510,9 +518,17 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     ESP_LOGD(TAG, "NO2 AE: %.3fmV", data.no2AuxiliaryElectrode);
 
     if (_no2CalibrationLoaded) {
+#if NO2_WE_OUTPUT_USE_CONCENTRATION
       ESP_LOGD(TAG, "NO2 Concentration: %.3fppb", data.no2WorkingElectrode);
+#else
+      ESP_LOGD(TAG, "NO2 WE: %.3fmV", data.no2WorkingElectrode);
+#endif
     } else {
+#if NO2_WE_OUTPUT_USE_CONCENTRATION
       ESP_LOGD(TAG, "NO2 Diff (uncalibrated): %.3fmV", data.no2WorkingElectrode);
+#else
+      ESP_LOGD(TAG, "NO2 WE (uncalibrated): %.3fmV", data.no2WorkingElectrode);
+#endif
     }
   }
 
