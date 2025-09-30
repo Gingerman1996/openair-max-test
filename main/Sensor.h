@@ -29,6 +29,8 @@ public:
   void printMeasures();
   AirgradientClient::MaxSensorPayload getLastAverageMeasure();
   bool co2AttemptManualCalibration();
+  bool setDGSxZero(); // DGSx zero calibration function
+
 
 private:
   const char *const TAG = "Sensor";

@@ -467,6 +467,32 @@ bool Sensor::co2AttemptManualCalibration() {
   return true;
 }
 
+bool Sensor::setDGSxZero() {
+  ESP_LOGI(TAG, "Starting DGSx zero calibration process...");
+  
+  // Check if DGSx sensor is available
+  if (!_dgsxAvailable || dgsx_ == nullptr) {
+    ESP_LOGE(TAG, "DGSx sensor not available for calibration");
+    return false;
+  }
+  
+  // Check if sensor is connected
+  if (!dgsx_->isConnected()) {
+    ESP_LOGE(TAG, "DGSx sensor not connected, cannot perform calibration");
+    return false;
+  }
+  
+  // Perform zero calibration using the DGSx calibrateZero function
+  ESP_LOGI(TAG, "Initiating DGSx zero calibration...");
+  if (dgsx_->calibrateZero()) {
+    ESP_LOGI(TAG, "✅ DGSx zero calibration completed successfully");
+    return true;
+  } else {
+    ESP_LOGE(TAG, "❌ DGSx zero calibration failed: %s", dgsx_->getLastError());
+    return false;
+  }
+}
+
 void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   // Set measure data to invalid for indication if respective sensor failed
   data.rco2 = DEFAULT_INVALID_CO2;
@@ -638,10 +664,10 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     dgsx_->clearBuffer();
     if (!dgsx_->isContinuousMode()) {
       dgsx_->requestMeasurement();
+      vTaskDelay(pdMS_TO_TICKS(500)); // Reduced from 1000ms to 500ms
     }
 
     // Reduced wait time for faster response
-    vTaskDelay(pdMS_TO_TICKS(500)); // Reduced from 1000ms to 500ms
 
     DGSx::Data dgsxData;
     // Reduced timeout from 3000ms to 1500ms for faster measurement cycles
@@ -953,7 +979,7 @@ void Sensor::_calculateMeasuresAverage() {
   }
 
   if (_dgsxIterationOkCount > 0) {
-    _averageMeasure.dgsxGasConcentration =
+    _averageMeasure.no2WorkingElectrode =
         _averageMeasure.dgsxGasConcentration / _dgsxIterationOkCount;
   }
 }

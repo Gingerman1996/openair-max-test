@@ -274,6 +274,8 @@ extern "C" void app_main(void) {
   if (g_configuration.isCO2CalibrationRequested()) {
     sensor.co2AttemptManualCalibration();
     g_configuration.resetCO2CalibrationRequest();
+
+    sensor.setDGSxZero(); // Call DGSx zero calibration function
   }
 
   // Start measure sensor sequence
