@@ -188,7 +188,6 @@ int DFRobot_IICSerial::write(const uint8_t *pBuf, int size) {
   }
   uint8_t *_pBuf = (uint8_t *)pBuf;
   sFsrReg_t fsr;
-  uint8_t val = 0;
   fsr = readFIFOStateReg();
   if (fsr.tFull == 1) {
     ESP_LOGV(TAG, "FIFO full!");
@@ -730,6 +729,8 @@ i2c_master_dev_handle_t DFRobot_IICSerial::getDeviceHandle(uint8_t addr) {
           .dev_addr_length = I2C_ADDR_BIT_LEN_7,
           .device_address = addr,
           .scl_speed_hz = 100000,
+          .scl_wait_us = 0,
+          .flags = {}
       };
       dev_handle_map[i].address = addr;
 

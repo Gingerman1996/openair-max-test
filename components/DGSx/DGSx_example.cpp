@@ -1,6 +1,8 @@
 #include "DGSx.h"
 #include "AirgradientSerial.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // Example usage of DGSx sensor component
 class DGSxExample {
@@ -83,7 +85,6 @@ public:
                 ESP_LOGI(TAG, "  Gas Concentration: %.2f", data.gasConcentration);
                 ESP_LOGI(TAG, "  Temperature: %.1f°C", data.temperature);
                 ESP_LOGI(TAG, "  Humidity: %.1f%%", data.humidity);
-                ESP_LOGI(TAG, "  Raw Value: %d", data.rawValue);
                 ESP_LOGI(TAG, "  Timestamp: %lu", data.timestamp);
             } else {
                 ESP_LOGW(TAG, "Measurement data invalid");

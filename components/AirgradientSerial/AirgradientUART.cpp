@@ -15,7 +15,9 @@ bool AirgradientUART::begin(int port, int baud, int rx, int tx) {
       .parity = UART_PARITY_DISABLE,
       .stop_bits = UART_STOP_BITS_1,
       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+      .rx_flow_ctrl_thresh = 0,
       .source_clk = UART_SCLK_DEFAULT,
+      .flags = {}
   };
 
   _port_num = static_cast<uart_port_t>(port);

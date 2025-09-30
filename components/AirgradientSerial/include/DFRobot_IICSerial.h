@@ -503,7 +503,7 @@ private:
   } DeviceInfo;
 
   // Array to store devices
-  DeviceInfo dev_handle_map[MAX_WK2132_ADDR] = {{0}};
+  DeviceInfo dev_handle_map[MAX_WK2132_ADDR] = {{0, nullptr}};
 
   i2c_master_bus_handle_t _i2c_bus_handle;
   uint8_t _addr;

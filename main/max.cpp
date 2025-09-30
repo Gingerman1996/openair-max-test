@@ -256,9 +256,10 @@ extern "C" void app_main(void) {
       .scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO,
       .clk_source = I2C_CLK_SRC_DEFAULT,
       .glitch_ignore_cnt = 7,
-      // .flags.enable_internal_pullup = true,
+      .intr_priority = 0,
+      .trans_queue_depth = 0,
+      .flags = {.enable_internal_pullup = true, .allow_pd = false}
   };
-  bus_cfg.flags.enable_internal_pullup = true;
   i2c_master_bus_handle_t bus_handle;
   ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
 
@@ -380,11 +381,14 @@ void initConsole() {
   usb_serial_jtag_vfs_use_driver();
 
   /* Initialize the console */
-  esp_console_config_t console_config = {.max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
-                                         .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
+  esp_console_config_t console_config = {
+      .max_cmdline_length = CONSOLE_MAX_CMDLINE_LENGTH,
+      .max_cmdline_args = CONSOLE_MAX_CMDLINE_ARGS,
+      .heap_alloc_caps = MALLOC_CAP_DEFAULT,
 #if CONFIG_LOG_COLORS
-                                         .hint_color = atoi(LOG_COLOR_CYAN)
+      .hint_color = atoi(LOG_COLOR_CYAN),
 #endif
+      .hint_bold = 0
   };
   ESP_ERROR_CHECK(esp_console_init(&console_config));
 }

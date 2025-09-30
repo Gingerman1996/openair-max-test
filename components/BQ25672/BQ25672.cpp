@@ -51,6 +51,8 @@ esp_err_t BQ25672::begin(i2c_master_bus_handle_t busHandle) {
       .dev_addr_length = I2C_ADDR_BIT_LEN_7,
       .device_address = BQ25672_I2C_ADDRESS,
       .scl_speed_hz = 500000,
+      .scl_wait_us = 0,
+      .flags = {}
   };
   ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(busHandle, &dev_cfg, &_dev_handle), TAG,
                       "Failed add i2c device of BQ25672");
