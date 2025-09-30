@@ -44,7 +44,7 @@ public:
         ESP_LOGI(TAG, "Starting continuous measurement mode...");
         
         // Enable continuous mode with 5-second intervals
-        sensor->setContinuousMode(true, 5);
+        sensor->setContinuousMode(true);
         
         DGSx::Data data;
         

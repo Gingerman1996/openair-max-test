@@ -69,7 +69,7 @@ bool DGSx::queryEEPROM() {
   vTaskDelay(pdMS_TO_TICKS(500)); // Wait for sensor to start responding
 
   uint32_t startTime = _getMillis();
-  uint32_t timeout = 5000;
+  uint32_t timeout = 2000;
   bool gotResponse = false;
   int lineCount = 0;
 
@@ -227,18 +227,41 @@ bool DGSx::readUntil(Data &data, uint16_t timeoutMs) {
   return false;
 }
 
-void DGSx::setContinuousMode(bool enable, uint16_t intervalSeconds) {
+void DGSx::setContinuousMode(bool enable) {
   if (agSerial_ == nullptr) {
     _setError("Serial interface not available");
     return;
   }
 
-  _continuousMode = enable;
-  _requestInterval = intervalSeconds * 1000;
+  // First, check current sensor state by attempting to read data
+  bool sensorInContinuousMode = false;
+  ESP_LOGI(TAG, "Checking current sensor state...");
+  
+  // Clear buffer first
+  clearBuffer();
+  
+  // Try to read data for 1 second to see if sensor is already sending continuous data
+  Data testData;
+  if (readUntil(testData, 1000)) {
+    if (testData.isValid && testData.gasConcentration > 0) {
+      sensorInContinuousMode = true;
+      ESP_LOGI(TAG, "Sensor is already in continuous mode (received PPB data: %.1f)", testData.gasConcentration);
+    }
+  } else {
+    ESP_LOGI(TAG, "No continuous data detected, sensor appears to be in single-shot mode");
+  }
 
   if (enable) {
-    ESP_LOGI(TAG, "Enabling continuous mode with %d second interval",
-             intervalSeconds);
+    if (sensorInContinuousMode) {
+      ESP_LOGI(TAG, "Sensor already in continuous mode, no need to send 'C' command");
+      _continuousMode = true;
+      return;
+    }
+    
+    ESP_LOGI(TAG, "Enabling continuous mode...");
+
+    // Clear buffer before starting
+    clearBuffer();
 
     // Send continuous mode command
     uint8_t cmd = 'C';
@@ -247,9 +270,27 @@ void DGSx::setContinuousMode(bool enable, uint16_t intervalSeconds) {
       return;
     }
 
+    _continuousMode = true;
     ESP_LOGI(TAG, "Continuous mode command 'C' sent to sensor");
+
   } else {
-    ESP_LOGI(TAG, "Continuous mode disabled (no command sent)");
+    if (!sensorInContinuousMode) {
+      ESP_LOGI(TAG, "Sensor already in single-shot mode, no need to toggle");
+      _continuousMode = false;
+      return;
+    }
+    
+    ESP_LOGI(TAG, "Disabling continuous mode...");
+    
+    // Send 'C' command to toggle off continuous mode (since it's a toggle)
+    uint8_t toggleCmd = 'C';
+    if (agSerial_->write(&toggleCmd, 1) != 1) {
+      _setError("Failed to send toggle command to disable continuous mode");
+      return;
+    }
+    
+    _continuousMode = false;
+    ESP_LOGI(TAG, "Continuous mode toggled off with 'C' command");
   }
 }
 
@@ -266,19 +307,53 @@ bool DGSx::calibrateZero() {
 
   clearBuffer();
 
+  ESP_LOGI(TAG, "Starting NO2 zero calibration process...");
+
+  // Step 1: Enable continuous mode for stability monitoring
+  ESP_LOGI(TAG, "Enabling continuous mode for stability check...");
+  this->setContinuousMode(true); // Enable continuous mode
+  
+  // Wait a moment for continuous data to start
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  
+  // You can now read individual measurements to check stability
+  Data stabilityData;
+  int stableReadings = 0;
+  for (int i = 0; i < 5; i++) {
+    if (this->readUntil(stabilityData, 3000)) {
+      if (stabilityData.isValid) {
+        stableReadings++;
+        ESP_LOGI(TAG, "Stability check %d/5: %.1f PPB", i+1, stabilityData.gasConcentration);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  
+  if (stableReadings < 3) {
+    ESP_LOGW(TAG, "Insufficient stable readings for calibration");
+    this->setContinuousMode(false); // Stop continuous mode
+    _setError("Insufficient stable readings");
+    return false;
+  }
+
+  // Stop continuous mode before calibration
+  this->setContinuousMode(false);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  // After reading, perform actual calibration
+  clearBuffer();
   ESP_LOGI(TAG, "Sending NO2 zero calibration command 'Z'...");
 
-  // Send NO2 zero calibration command
-  uint8_t cmd = 'Z';
-  if (agSerial_->write(&cmd, 1) != 1) {
+  uint8_t calCmd = 'Z';
+  if (agSerial_->write(&calCmd, 1) != 1) {
     _setError("Failed to send NO2 zero calibration command");
     return false;
   }
 
-  // Wait for acknowledgment
-  Data data;
-  if (readUntil(data, 5000)) {
-    ESP_LOGI(TAG, "NO2 zero calibration command acknowledged");
+  // Wait for calibration acknowledgment
+  Data calData;
+  if (readUntil(calData, 10000)) { // 10 second timeout for calibration
+    ESP_LOGI(TAG, "✅ NO2 zero calibration completed successfully");
     return true;
   } else {
     _setError("No acknowledgment received for NO2 zero calibration");
@@ -287,6 +362,8 @@ bool DGSx::calibrateZero() {
 }
 
 const char *DGSx::getLastError() { return _lastError; }
+
+bool DGSx::isContinuousMode() { return _continuousMode; }
 
 bool DGSx::_processResponse(Data &data) {
   // Initialize data structure

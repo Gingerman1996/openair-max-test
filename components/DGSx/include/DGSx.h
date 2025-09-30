@@ -32,61 +32,65 @@ public:
 
   // Initialize the sensor
   bool begin();
-  
+
   // Check if sensor is connected and responding
   bool isConnected();
-  
+
   // Query EEPROM settings from DGS/DGS2
   bool queryEEPROM();
-  
+
   // Query header string from DGS2 (not recognized by DGS)
   bool queryHeader();
-  
+
   // Request a measurement reading
   void requestMeasurement();
-  
+
   // Clear the serial buffer
   void clearBuffer();
-  
+
   // Non-blocking function to parse response
   bool read(Data &data);
-  
+
   // Blocking function to parse response with timeout
   bool readUntil(Data &data, uint16_t timeoutMs = 2000);
-  
-  // Enable/disable continuous output mode
-  void setContinuousMode(bool enable, uint16_t intervalSeconds = 5);
 
+  // Enable/disable continuous output mode
+  void setContinuousMode(bool enable);
+
+  // Perform NO2 zero calibration
   bool calibrateZero();
-  
+
   // Get last error message
-  const char* getLastError();
+  const char *getLastError();
+  
+  // Get continuous mode status
+  bool isContinuousMode();
 
 private:
   const char *const TAG = "DGSx";
   AirgradientSerial *agSerial_ = nullptr;
-  
+
   // Buffer for incoming data
   static const size_t BUFFER_SIZE = 256;
   char _buffer[BUFFER_SIZE];
   size_t _bufferIndex = 0;
-  
+
   // Timing
   uint32_t _lastRequestTime = 0;
   uint32_t _requestInterval = 5000; // 5 seconds default
   bool _continuousMode = false;
-  
+
   // Error handling
   char _lastError[64];
-  
+
   // Gas type detected from barcode
   std::string _detectedGasType;
-  
+
   // Internal helper functions
   bool _processResponse(Data &data);
-  bool _parseDataLine(const char* line, Data &data);
+  bool _parseDataLine(const char *line, Data &data);
   bool _waitForResponse(uint16_t timeoutMs);
-  void _setError(const char* error);
+  void _setError(const char *error);
   uint32_t _getMillis();
 };
 

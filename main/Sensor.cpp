@@ -56,10 +56,9 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
 
     // Set measurement samples only if not configured before
     if (rtc_samples_configured == 0) {
-      // ===== MEASUREMENT SAMPLES CONFIGURATION (COMMENTED FOR FUTURE USE) =====
-      // ESP_LOGI(TAG, "First time setup - configuring measurement samples...");
-      // bool samplesChanged = false;
-      // do {
+      // ===== MEASUREMENT SAMPLES CONFIGURATION (COMMENTED FOR FUTURE USE)
+      // ===== ESP_LOGI(TAG, "First time setup - configuring measurement
+      // samples..."); bool samplesChanged = false; do {
       //   samplesChanged = co2_->set_measurement_samples(
       //       CO2_MEASUREMENT_SAMPLES); // Use defined value for samples
       // } while (!samplesChanged);
@@ -72,7 +71,8 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
 
       if (/**samplesChanged && **/ modeChanged) {
         // Restart CO2 sensor to apply measurement mode setting
-        ESP_LOGI(TAG, "Restarting CO2 sensor to apply measurement mode setting...");
+        ESP_LOGI(TAG,
+                 "Restarting CO2 sensor to apply measurement mode setting...");
 
         // Disable GPIO hold before reset
         gpio_hold_dis(EN_CO2);
@@ -99,7 +99,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
 
         do {
           vTaskDelay(pdMS_TO_TICKS(2400));
-          
+
           // Check if sensor is in single mode before triggering
           if (co2_->is_single_mode()) {
             int triggerResult = co2_->trigger_single_measurement();
@@ -108,12 +108,13 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
               vTaskDelay(pdMS_TO_TICKS(3000)); // Wait 3 seconds
               ESP_LOGD(TAG, "Single measurement triggered for init reading...");
             } else {
-              ESP_LOGW(TAG, "Failed to trigger single measurement in init, trying to read anyway...");
+              ESP_LOGW(TAG, "Failed to trigger single measurement in init, "
+                            "trying to read anyway...");
             }
           } else {
             ESP_LOGD(TAG, "Sensor in continuous mode, reading directly...");
           }
-          
+
           co2_reading = co2_->read_sensor_measurements();
           retry_count++;
           ESP_LOGI(TAG, "CO2 reading attempt %d: %d ppm", retry_count,
@@ -141,12 +142,11 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
                       "restart needed");
       }
     } else {
-      ESP_LOGI(TAG,
-               "Configuration already completed, skipping setup...");
+      ESP_LOGI(TAG, "Configuration already completed, skipping setup...");
     }
 
     co2_->read_sensor_config(); // Check measurement samples setting and mode
-    
+
     co2_->setABC(true);
     co2_->setABCPeriod(co2ABCDays * 24); // Convert to hours
     ESP_LOGI(TAG, "CO2 ABC status: %d", co2_->isABCEnabled() ? 1 : 0);
@@ -235,20 +235,21 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
   } else {
     dgsx_ = new DGSx(agsDGSx_);
     if (!dgsx_->begin()) {
-      ESP_LOGE(TAG, "Failed to initialize DGSx sensor: %s", dgsx_->getLastError());
+      ESP_LOGE(TAG, "Failed to initialize DGSx sensor: %s",
+               dgsx_->getLastError());
       _dgsxAvailable = false;
     } else {
       ESP_LOGI(TAG, "DGSx gas sensor initialized successfully");
-      
+
       // Clear any existing data first
       dgsx_->clearBuffer();
       vTaskDelay(pdMS_TO_TICKS(500));
-      
+
       // Query and read sensor EEPROM information
       ESP_LOGI(TAG, "Querying DGSx EEPROM information...");
       if (dgsx_->queryEEPROM()) {
         ESP_LOGI(TAG, "DGSx EEPROM query sent successfully");
-        
+
         // Wait and read EEPROM response
         vTaskDelay(pdMS_TO_TICKS(100)); // Longer wait
         DGSx::Data eepromData;
@@ -262,9 +263,10 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
       } else {
         ESP_LOGW(TAG, "Failed to send DGSx EEPROM query");
       }
-      
-      // vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for EEPROM query to complete (optimized timing)
-      
+
+      // vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for EEPROM query to complete
+      // (optimized timing)
+
       // Check if sensor is connected and responding
       if (!dgsx_->isConnected()) {
         ESP_LOGW(TAG, "DGSx sensor may not be properly connected");
@@ -272,7 +274,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
         ESP_LOGI(TAG, "DGSx sensor is responding to queries");
 
         ESP_LOGI(TAG, "Enabling DGSx continuous mode...");
-        dgsx_->setContinuousMode(true, 5); // Enable continuous mode
+        dgsx_->setContinuousMode(true);
       }
     }
   }
@@ -289,7 +291,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
       _pms1Available = false;
     }
   }
-  
+
   ///////////////////////////////////////////////////////////////////////////
   // PMS2 CONNECTION CHECK - COMMENTED OUT FOR DGSx TESTING
   ///////////////////////////////////////////////////////////////////////////
@@ -358,7 +360,8 @@ bool Sensor::startMeasures(int iterations, int intervalMs) {
   _averageMeasure.no2WorkingElectrode = DEFAULT_INVALID_VOLT;
   _averageMeasure.no2AuxiliaryElectrode = DEFAULT_INVALID_VOLT;
   _averageMeasure.afeTemp = DEFAULT_INVALID_VOLT;
-  _averageMeasure.dgsxGasConcentration = -1.0f; // Initialize DGSx gas concentration to invalid
+  _averageMeasure.dgsxGasConcentration =
+      -1.0f; // Initialize DGSx gas concentration to invalid
 
   AirgradientClient::MaxSensorPayload iterationData;
 
@@ -380,8 +383,8 @@ bool Sensor::startMeasures(int iterations, int intervalMs) {
       toDelay = 0;
     }
 
-    ESP_LOGI(TAG, "Iteration %d took %ums to finish, next iteration in %ums", i, timeSpendMs,
-             toDelay);
+    ESP_LOGI(TAG, "Iteration %d took %ums to finish, next iteration in %ums", i,
+             timeSpendMs, toDelay);
     vTaskDelay(pdMS_TO_TICKS(toDelay));
   }
 
@@ -416,7 +419,9 @@ void Sensor::printMeasures() {
   ESP_LOGI(TAG, "AFE Temperature: %.3fmV", _averageMeasure.afeTemp);
 }
 
-AirgradientClient::MaxSensorPayload Sensor::getLastAverageMeasure() { return _averageMeasure; }
+AirgradientClient::MaxSensorPayload Sensor::getLastAverageMeasure() {
+  return _averageMeasure;
+}
 
 bool Sensor::co2AttemptManualCalibration() {
   ESP_LOGI(TAG, "Attempt to do manual calibration");
@@ -480,23 +485,27 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   data.no2WorkingElectrode = DEFAULT_INVALID_VOLT;
   data.no2AuxiliaryElectrode = DEFAULT_INVALID_VOLT;
   data.afeTemp = DEFAULT_INVALID_VOLT;
-  data.dgsxGasConcentration = -1.0f; // Initialize DGSx gas concentration to invalid
+  data.dgsxGasConcentration =
+      -1.0f; // Initialize DGSx gas concentration to invalid
 
   if (_co2Available) {
     // Check if sensor is in single mode and trigger measurement if needed
     if (co2_->is_single_mode()) {
       int triggerResult = co2_->trigger_single_measurement();
       if (triggerResult == 0) {
-        // Reduced wait time for faster measurement cycles (from 3000ms to 2500ms)
+        // Reduced wait time for faster measurement cycles (from 3000ms to
+        // 2500ms)
         vTaskDelay(pdMS_TO_TICKS(2500)); // Wait 2.5 seconds instead of 3
         ESP_LOGD(TAG, "Single measurement triggered, reading CO2 value...");
       } else {
-        ESP_LOGW(TAG, "Failed to trigger single measurement, trying to read anyway...");
+        ESP_LOGW(
+            TAG,
+            "Failed to trigger single measurement, trying to read anyway...");
       }
     } else {
       ESP_LOGD(TAG, "Sensor in continuous mode, reading CO2 value directly...");
     }
-    
+
     data.rco2 = co2_->read_sensor_measurements();
     ESP_LOGD(TAG, "CO2: %d", data.rco2);
   }
@@ -624,14 +633,16 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   ///////////////////////////////////////////////////////////////////////////
   if (_dgsxAvailable) {
     ESP_LOGD(TAG, "Reading DGSx gas sensor...");
-    
+
     // Clear buffer and request measurement
     dgsx_->clearBuffer();
-    dgsx_->requestMeasurement();
-    
+    if (!dgsx_->isContinuousMode()) {
+      dgsx_->requestMeasurement();
+    }
+
     // Reduced wait time for faster response
     vTaskDelay(pdMS_TO_TICKS(500)); // Reduced from 1000ms to 500ms
-    
+
     DGSx::Data dgsxData;
     // Reduced timeout from 3000ms to 1500ms for faster measurement cycles
     if (dgsx_->readUntil(dgsxData, 1500)) {
@@ -643,17 +654,19 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
         if (!dgsxData.gasType.empty()) {
           ESP_LOGD(TAG, "  Gas Type: %s", dgsxData.gasType.c_str());
         }
-        
+
         // Store the DGSx gas concentration in the payload structure
         data.dgsxGasConcentration = dgsxData.gasConcentration;
-        
-        ESP_LOGI(TAG, "🌬️ DGSx Gas: %.2f PPB (%s)", dgsxData.gasConcentration, 
-                 dgsxData.gasType.empty() ? "Unknown" : dgsxData.gasType.c_str());
+
+        ESP_LOGI(TAG, "🌬️ DGSx Gas: %.2f PPB (%s)", dgsxData.gasConcentration,
+                 dgsxData.gasType.empty() ? "Unknown"
+                                          : dgsxData.gasType.c_str());
       } else {
         ESP_LOGW(TAG, "DGSx measurement returned invalid data");
       }
     } else {
-      ESP_LOGW(TAG, "Failed to get DGSx measurement: %s", dgsx_->getLastError());
+      ESP_LOGW(TAG, "Failed to get DGSx measurement: %s",
+               dgsx_->getLastError());
     }
   }
   ///////////////////////////////////////////////////////////////////////////
@@ -814,7 +827,8 @@ void Sensor::_applyIteration(AirgradientClient::MaxSensorPayload &data) {
     if (_averageMeasure.dgsxGasConcentration < 0) {
       _averageMeasure.dgsxGasConcentration = data.dgsxGasConcentration;
     } else {
-      _averageMeasure.dgsxGasConcentration = _averageMeasure.dgsxGasConcentration + data.dgsxGasConcentration;
+      _averageMeasure.dgsxGasConcentration =
+          _averageMeasure.dgsxGasConcentration + data.dgsxGasConcentration;
     }
     _dgsxIterationOkCount = _dgsxIterationOkCount + 1;
   }
@@ -837,8 +851,8 @@ void Sensor::_warmUpSensor() {
   ///////////////////////////////////////////////////////////////////////////
   // WARMUP SENSORS - PMS2 COMMENTED OUT FOR DGSx TESTING
   ///////////////////////////////////////////////////////////////////////////
-  // Warmup PM1 while also do SGP conditioning (PMS2 commented out for DGSx testing)
-  // Only if sensor is available
+  // Warmup PM1 while also do SGP conditioning (PMS2 commented out for DGSx
+  // testing) Only if sensor is available
   for (int i = 10; i >= 0; i--) {
     ESP_LOGI(TAG, "Warming up PMS and/or SGP41 sensors %d", i);
     vTaskDelay(pdMS_TO_TICKS(1000));
