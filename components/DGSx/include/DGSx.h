@@ -56,6 +56,8 @@ public:
   
   // Enable/disable continuous output mode
   void setContinuousMode(bool enable, uint16_t intervalSeconds = 5);
+
+  bool calibrateZero();
   
   // Get last error message
   const char* getLastError();

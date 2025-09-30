@@ -250,7 +250,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
         ESP_LOGI(TAG, "DGSx EEPROM query sent successfully");
         
         // Wait and read EEPROM response
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Longer wait
+        vTaskDelay(pdMS_TO_TICKS(100)); // Longer wait
         DGSx::Data eepromData;
         for (int i = 0; i < 20; i++) { // Try for 10 seconds
           if (dgsx_->read(eepromData)) {
@@ -270,6 +270,9 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
         ESP_LOGW(TAG, "DGSx sensor may not be properly connected");
       } else {
         ESP_LOGI(TAG, "DGSx sensor is responding to queries");
+
+        ESP_LOGI(TAG, "Enabling DGSx continuous mode...");
+        dgsx_->setContinuousMode(true, 5); // Enable continuous mode
       }
     }
   }
