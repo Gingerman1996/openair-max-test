@@ -236,28 +236,32 @@ void DGSx::setContinuousMode(bool enable) {
   // First, check current sensor state by attempting to read data
   bool sensorInContinuousMode = false;
   ESP_LOGI(TAG, "Checking current sensor state...");
-  
+
   // Clear buffer first
   clearBuffer();
-  
-  // Try to read data for 1 second to see if sensor is already sending continuous data
+
+  // Try to read data for 1 second to see if sensor is already sending
+  // continuous data
   Data testData;
   if (readUntil(testData, 1000)) {
-    if (testData.isValid && testData.gasConcentration > 0) {
-      sensorInContinuousMode = true;
-      ESP_LOGI(TAG, "Sensor is already in continuous mode (received PPB data: %.1f)", testData.gasConcentration);
-    }
+    ESP_LOGI(TAG,
+             "Sensor is already in continuous mode (received PPB data: %.1f)",
+             testData.gasConcentration);
+    sensorInContinuousMode = true;
   } else {
-    ESP_LOGI(TAG, "No continuous data detected, sensor appears to be in single-shot mode");
+    ESP_LOGI(TAG, "No continuous data detected, sensor appears to be in "
+                  "single-shot mode");
   }
 
   if (enable) {
     if (sensorInContinuousMode) {
-      ESP_LOGI(TAG, "Sensor already in continuous mode, no need to send 'C' command");
+      ESP_LOGI(
+          TAG,
+          "Sensor already in continuous mode, no need to send 'C' command");
       _continuousMode = true;
       return;
     }
-    
+
     ESP_LOGI(TAG, "Enabling continuous mode...");
 
     // Clear buffer before starting
@@ -279,16 +283,16 @@ void DGSx::setContinuousMode(bool enable) {
       _continuousMode = false;
       return;
     }
-    
+
     ESP_LOGI(TAG, "Disabling continuous mode...");
-    
+
     // Send 'C' command to toggle off continuous mode (since it's a toggle)
     uint8_t toggleCmd = 'C';
     if (agSerial_->write(&toggleCmd, 1) != 1) {
       _setError("Failed to send toggle command to disable continuous mode");
       return;
     }
-    
+
     _continuousMode = false;
     ESP_LOGI(TAG, "Continuous mode toggled off with 'C' command");
   }
@@ -305,143 +309,225 @@ bool DGSx::calibrateZero() {
     return false;
   }
 
-  clearBuffer();
+  const int MAX_CALIBRATION_ATTEMPTS = 10;
+  int attemptNumber = 0;
+  bool calibrationSuccess = false;
 
-  ESP_LOGI(TAG, "Starting NO2 zero calibration process...");
+  ESP_LOGI(TAG, "Starting NO2 zero calibration process (max %d attempts)...", 
+           MAX_CALIBRATION_ATTEMPTS);
 
-  // Step 1: Enable continuous mode for stability monitoring
-  ESP_LOGI(TAG, "Enabling continuous mode for stability check...");
-  this->setContinuousMode(true); // Enable continuous mode
-  
-  // Wait a moment for continuous data to start
-  vTaskDelay(pdMS_TO_TICKS(2000));
-  
-  // You can now read individual measurements to check stability
-  Data stabilityData;
-  int stableReadings = 0;
-  float lastReading = -999.0; // Initialize to impossible value
-  const float STABILITY_THRESHOLD = 5.0; // PPB tolerance for stability
-  const int MIN_STABLE_READINGS = 3; // Minimum consecutive stable readings required
-  uint32_t stabilityStartTime = _getMillis();
-  uint32_t stabilityTimeout = 20000; // 20 seconds timeout
-  int totalReadings = 0;
-  
-  ESP_LOGI(TAG, "Checking stability for up to 20 seconds (threshold: ±%.1f PPB)...", STABILITY_THRESHOLD);
-  
-  while ((_getMillis() - stabilityStartTime) < stabilityTimeout) {
-    if (this->readUntil(stabilityData, 3000)) {
-      if (stabilityData.isValid) {
-        totalReadings++;
-        
-        if (lastReading != -999.0) {
-          float difference = abs(stabilityData.gasConcentration - lastReading);
-          
-          if (difference <= STABILITY_THRESHOLD) {
-            stableReadings++;
-            ESP_LOGI(TAG, "Stable reading %d: %.1f PPB (diff: %.1f)", 
-                     stableReadings, stabilityData.gasConcentration, difference);
-            
-            if (stableReadings >= MIN_STABLE_READINGS) {
-              ESP_LOGI(TAG, "✅ Sensor readings are stable after %d readings in %lu ms", 
-                       totalReadings, _getMillis() - stabilityStartTime);
-              break;
+  while (attemptNumber < MAX_CALIBRATION_ATTEMPTS && !calibrationSuccess) {
+    attemptNumber++;
+    ESP_LOGI(TAG, "========== Calibration Attempt %d/%d ==========", 
+             attemptNumber, MAX_CALIBRATION_ATTEMPTS);
+
+    clearBuffer();
+
+    // Step 1: Enable continuous mode for stability monitoring
+    ESP_LOGI(TAG, "Enabling continuous mode for stability check...");
+    this->setContinuousMode(true); // Enable continuous mode
+
+    // Wait a moment for continuous data to start
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Check stability
+    Data stabilityData;
+    int stableReadings = 0;
+    float lastReading = -999.0;            // Initialize to impossible value
+    const float STABILITY_THRESHOLD = 5.0; // PPB tolerance for stability
+    const int MIN_STABLE_READINGS =
+        3; // Minimum consecutive stable readings required
+    uint32_t stabilityStartTime = _getMillis();
+    uint32_t stabilityTimeout = 20000; // 20 seconds timeout
+    int totalReadings = 0;
+
+    ESP_LOGI(TAG,
+             "Checking stability for up to 20 seconds (threshold: ±%.1f PPB)...",
+             STABILITY_THRESHOLD);
+
+    while ((_getMillis() - stabilityStartTime) < stabilityTimeout) {
+      if (this->readUntil(stabilityData, 3000)) {
+        if (stabilityData.isValid) {
+          totalReadings++;
+
+          if (lastReading != -999.0) {
+            float difference = abs(stabilityData.gasConcentration - lastReading);
+
+            if (difference <= STABILITY_THRESHOLD) {
+              stableReadings++;
+              ESP_LOGI(TAG, "Stable reading %d: %.1f PPB (diff: %.1f)",
+                       stableReadings, stabilityData.gasConcentration,
+                       difference);
+
+              if (stableReadings >= MIN_STABLE_READINGS) {
+                ESP_LOGI(
+                    TAG,
+                    "✅ Sensor readings are stable after %d readings in %lu ms",
+                    totalReadings, _getMillis() - stabilityStartTime);
+                break;
+              }
+            } else {
+              // Reset counter if reading is not stable
+              ESP_LOGI(
+                  TAG,
+                  "Unstable reading %d: %.1f PPB (diff: %.1f) - resetting count",
+                  totalReadings, stabilityData.gasConcentration, difference);
+              stableReadings = 0;
             }
           } else {
-            // Reset counter if reading is not stable
-            ESP_LOGI(TAG, "Unstable reading %d: %.1f PPB (diff: %.1f) - resetting count", 
-                     totalReadings, stabilityData.gasConcentration, difference);
-            stableReadings = 0;
+            ESP_LOGI(TAG, "First reading: %.1f PPB",
+                     stabilityData.gasConcentration);
           }
-        } else {
-          ESP_LOGI(TAG, "First reading: %.1f PPB", stabilityData.gasConcentration);
-        }
-        
-        lastReading = stabilityData.gasConcentration;
-      }
-    }
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
-  
-  if (stableReadings < MIN_STABLE_READINGS) {
-    ESP_LOGW(TAG, "Insufficient stable readings for calibration (got %d, need %d)", 
-             stableReadings, MIN_STABLE_READINGS);
-    this->setContinuousMode(false); // Stop continuous mode
-    _setError("Insufficient stable readings");
-    return false;
-  }
 
-  // After reading, perform actual calibration
-  clearBuffer();
-  ESP_LOGI(TAG, "Sending NO2 zero calibration command 'Z'...");
-
-  uint8_t calCmd = 'Z';
-  if (agSerial_->write(&calCmd, 1) != 1) {
-    _setError("Failed to send NO2 zero calibration command");
-    return false;
-  }
-
-  // Wait for calibration acknowledgment and verify readings
-  Data calData;
-  ESP_LOGI(TAG, "Monitoring calibration results for 20 seconds...");
-  
-  uint32_t calStartTime = _getMillis();
-  uint32_t calTimeout = 20000; // 20 seconds timeout
-  int validPostCalReadings = 0;
-  int negativeReadings = 0;
-  bool calibrationSuccess = false;
-  
-  while ((_getMillis() - calStartTime) < calTimeout) {
-    if (readUntil(calData, 3000)) { // 3 second timeout per reading
-      if (calData.isValid) {
-        validPostCalReadings++;
-        
-        if (calData.gasConcentration < 0) {
-          negativeReadings++;
-          ESP_LOGW(TAG, "Post-cal reading %d: %.1f PPB (NEGATIVE - calibration may have failed)", 
-                   validPostCalReadings, calData.gasConcentration);
-        } else {
-          ESP_LOGI(TAG, "Post-cal reading %d: %.1f PPB (positive - good)", 
-                   validPostCalReadings, calData.gasConcentration);
-        }
-        
-        // Check if we have enough readings to evaluate calibration
-        if (validPostCalReadings >= 5) {
-          float negativePercentage = (float)negativeReadings / validPostCalReadings * 100.0;
-          ESP_LOGI(TAG, "Calibration assessment: %d/%d readings negative (%.1f%%)", 
-                   negativeReadings, validPostCalReadings, negativePercentage);
-          
-          // Consider calibration successful if less than 20% of readings are negative
-          if (negativePercentage < 20.0) {
-            calibrationSuccess = true;
-            ESP_LOGI(TAG, "✅ Zero calibration appears successful - low negative readings");
-            break;
-          }
+          lastReading = stabilityData.gasConcentration;
         }
       }
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    if (stableReadings < MIN_STABLE_READINGS) {
+      ESP_LOGW(TAG,
+               "Insufficient stable readings for calibration (got %d, need %d)",
+               stableReadings, MIN_STABLE_READINGS);
+      this->setContinuousMode(false); // Stop continuous mode
+      
+      if (attemptNumber < MAX_CALIBRATION_ATTEMPTS) {
+        ESP_LOGI(TAG, "⏳ Waiting 5 seconds before retry...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      } else {
+        _setError("Insufficient stable readings after all attempts");
+        return false;
+      }
+    }
+
+    // Perform actual calibration
+    clearBuffer();
+    ESP_LOGI(TAG, "Sending NO2 zero calibration command 'Z'...");
+
+    uint8_t calCmd = 'Z';
+    if (agSerial_->write(&calCmd, 1) != 1) {
+      _setError("Failed to send NO2 zero calibration command");
+      this->setContinuousMode(false);
+      
+      if (attemptNumber < MAX_CALIBRATION_ATTEMPTS) {
+        ESP_LOGI(TAG, "⏳ Waiting 5 seconds before retry...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      } else {
+        return false;
+      }
+    }
+
+    // Wait for calibration acknowledgment and verify readings
+    Data calData;
+    ESP_LOGI(TAG, "Monitoring calibration results for 20 seconds...");
+
+    uint32_t calStartTime = _getMillis();
+    uint32_t calTimeout = 20000; // 20 seconds timeout
+    int validPostCalReadings = 0;
+    int negativeReadings = 0;
+
+    while ((_getMillis() - calStartTime) < calTimeout) {
+      if (readUntil(calData, 3000)) { // 3 second timeout per reading
+        if (calData.isValid) {
+          validPostCalReadings++;
+
+          if (calData.gasConcentration < 0) {
+            negativeReadings++;
+            ESP_LOGW(TAG,
+                     "Post-cal reading %d: %.1f PPB (NEGATIVE - calibration may "
+                     "have failed)",
+                     validPostCalReadings, calData.gasConcentration);
+          } else {
+            ESP_LOGI(TAG, "Post-cal reading %d: %.1f PPB (positive - good)",
+                     validPostCalReadings, calData.gasConcentration);
+          }
+
+          // Check if we have enough readings to evaluate calibration
+          if (validPostCalReadings >= 5) {
+            float negativePercentage =
+                (float)negativeReadings / validPostCalReadings * 100.0;
+            ESP_LOGI(TAG,
+                     "Calibration assessment: %d/%d readings negative (%.1f%%)",
+                     negativeReadings, validPostCalReadings, negativePercentage);
+
+            // Consider calibration successful if less than 20% of readings are
+            // negative
+            if (negativePercentage < 20.0) {
+              calibrationSuccess = true;
+              ESP_LOGI(TAG, "✅ Zero calibration appears successful - low "
+                            "negative readings");
+              break;
+            }
+          }
+        }
+      }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // Final assessment for this attempt
+    if (validPostCalReadings == 0) {
+      ESP_LOGE(TAG, "❌ Attempt %d: No valid readings received after calibration command", 
+               attemptNumber);
+      
+      if (attemptNumber < MAX_CALIBRATION_ATTEMPTS) {
+        ESP_LOGI(TAG, "⏳ Waiting 5 seconds before retry...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      } else {
+        _setError("No valid readings received after calibration command");
+        return false;
+      }
+    }
+
+    float finalNegativePercentage =
+        (float)negativeReadings / validPostCalReadings * 100.0;
+    ESP_LOGI(TAG, "Attempt %d results: %d/%d readings negative (%.1f%%)",
+             attemptNumber, negativeReadings, validPostCalReadings, 
+             finalNegativePercentage);
+
+    if (finalNegativePercentage >= 50.0) {
+      ESP_LOGE(TAG, "❌ Attempt %d: Calibration failed - too many negative readings", 
+               attemptNumber);
+      
+      if (attemptNumber < MAX_CALIBRATION_ATTEMPTS) {
+        ESP_LOGI(TAG, "⏳ Waiting 5 seconds before retry...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      } else {
+        _setError("High percentage of negative readings after all calibration attempts");
+        return false;
+      }
+    } else if (finalNegativePercentage >= 20.0) {
+      ESP_LOGW(TAG, "⚠️  Attempt %d: Calibration partially successful - some negative readings remain", 
+               attemptNumber);
+      
+      if (attemptNumber < MAX_CALIBRATION_ATTEMPTS) {
+        ESP_LOGI(TAG, "⏳ Waiting 5 seconds before retry to improve results...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      } else {
+        ESP_LOGW(TAG, "⚠️  Accepting partial calibration after %d attempts", 
+                 MAX_CALIBRATION_ATTEMPTS);
+        calibrationSuccess = true;
+      }
+    } else {
+      // Success!
+      calibrationSuccess = true;
+    }
   }
-  
-  // Final assessment
-  if (validPostCalReadings == 0) {
-    _setError("No valid readings received after calibration command");
+
+  if (calibrationSuccess) {
+    ESP_LOGI(TAG, "🎉 NO2 zero calibration completed successfully after %d attempt(s)!", 
+             attemptNumber);
+    return true;
+  } else {
+    ESP_LOGE(TAG, "💥 NO2 zero calibration failed after %d attempts", 
+             MAX_CALIBRATION_ATTEMPTS);
+    _setError("Calibration failed after maximum retry attempts");
     return false;
   }
-  
-  float finalNegativePercentage = (float)negativeReadings / validPostCalReadings * 100.0;
-  ESP_LOGI(TAG, "Final calibration results: %d/%d readings negative (%.1f%%)", 
-           negativeReadings, validPostCalReadings, finalNegativePercentage);
-  
-  if (finalNegativePercentage >= 50.0) {
-    ESP_LOGE(TAG, "❌ Calibration likely failed - too many negative readings");
-    _setError("High percentage of negative readings after calibration");
-    return false;
-  } else if (finalNegativePercentage >= 20.0) {
-    ESP_LOGW(TAG, "⚠️  Calibration partially successful - some negative readings remain");
-  }
-  
-  ESP_LOGI(TAG, "✅ NO2 zero calibration completed successfully");
-  return true;
 }
 
 const char *DGSx::getLastError() { return _lastError; }
