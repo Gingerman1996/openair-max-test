@@ -28,6 +28,8 @@ public:
   // Update function to prevent WD_RST (Call this in loop)
   esp_err_t update();
 
+  esp_err_t prepareSleep();
+
   // Read VBAT, VSYS, VBUS in mV
   esp_err_t getVBAT(uint16_t *output);
   esp_err_t getVSYS(uint16_t *output);

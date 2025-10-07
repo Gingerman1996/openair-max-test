@@ -85,6 +85,24 @@ esp_err_t BQ25672::begin(i2c_master_bus_handle_t busHandle) {
   return ESP_OK;
 }
 
+esp_err_t BQ25672::prepareSleep() {
+  // To hold read register output
+
+  uint16_t value;
+  ESP_RETURN_ON_ERROR(writeRegister(REG2E_ADC_CTRL, 0x70), TAG,
+                      "Failed write to disable ADC");
+
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG2E_ADC_CTRL, 1, &value), TAG,
+                      "Failed check does ADC disabled");
+  if (value & 0x70) {
+    return ESP_OK;
+  }
+
+  ESP_LOGE(TAG, "Disable ADC control value is not as expected (0x%.2x)", (uint8_t)value);
+
+  return ESP_OK;
+}
+
 esp_err_t BQ25672::update() {
   // Attempt enable MPTT and read the status
   uint16_t value = 0;

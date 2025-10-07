@@ -373,6 +373,8 @@ protected:
    */
   void subSerialGlobalRegEnable(uint8_t subUartChannel, eGlobalRegType_t type);
 
+  void subSerialGlobalRegDisable(uint8_t subUartChannel, eGlobalRegType_t type);
+
   /**
    * @fn subSerialRegConfig
    * @brief Sub UART register configuration: SIER, FCR, LCR

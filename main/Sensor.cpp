@@ -31,6 +31,27 @@ RTC_DATA_ATTR static uint8_t rtc_samples_configured = 0;
 
 Sensor::Sensor(i2c_master_bus_handle_t busHandle) : _busHandle(busHandle) {}
 
+bool Sensor::prepareSleep(){
+      agsPM1_->end();
+      agsPM2_->end();
+
+      if (_co2Available) {
+        agsCO2_->end();
+      }
+
+      if(_chargerAvailable)
+      {
+        charger_->prepareSleep();
+      }
+      if (_tvocNoxAvailable) {
+      esp_err_t result = sgp4x_turn_heater_off(sgp_dev_hdl);
+      if (result != ESP_OK) {
+        ESP_LOGE(TAG, "sgp4x device sleep failed (%s)", esp_err_to_name(result));
+      }
+    }
+  return true;
+}
+
 bool Sensor::init(Configuration::Model model, int co2ABCDays) {
   ESP_LOGI(TAG, "Initializing sensor...");
   esp_log_level_set(TAG, ESP_LOG_DEBUG);

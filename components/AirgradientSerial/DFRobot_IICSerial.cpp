@@ -269,6 +269,27 @@ void DFRobot_IICSerial::subSerialGlobalRegEnable(uint8_t subUartChannel, eGlobal
   subSerialChnnlSwitch(channel);
 }
 
+void DFRobot_IICSerial::subSerialGlobalRegDisable(uint8_t subUartChannel, eGlobalRegType_t type) {
+  if (subUartChannel > SUBUART_CHANNEL_ALL) {
+    ESP_LOGV(TAG, "SUBSERIAL CHANNEL NUMBER ERROR!");
+    return;
+  }
+  uint8_t val = 0;
+  uint8_t regAddr = getGlobalRegType(type);
+  uint8_t channel = subSerialChnnlSwitch(SUBUART_CHANNEL_1);
+  ESP_LOGV(TAG, "reg: %.2x", regAddr);
+  if (readReg(regAddr, &val, 1) != 1) {
+    ESP_LOGV(TAG, "READ BYTE SIZE ERROR!");
+    return;
+  }
+  ESP_LOGV(TAG, "before: %.2x", val);
+    val = 0x00;
+  writeReg(regAddr, &val, 1);
+  readReg(regAddr, &val, 1);
+  ESP_LOGV(TAG, "after: %.2x", val);
+  subSerialChnnlSwitch(channel);
+}
+
 void DFRobot_IICSerial::subSerialPageSwitch(ePageNumber_t page) {
   if (page >= pageTotal) {
     return;
@@ -574,8 +595,9 @@ bool DFRobot_IICSerial::isChannelInSleep(uint8_t subUartChannel) {
 }
 
 void DFRobot_IICSerial::prepareSleep() {
-  sScrReg_t scr = {.rxEn = 0x00, .txEn = 0x00, .sleepEn = 0x01, .rsv = 0x00};
-  subSerialRegConfig(REG_WK2132_SCR, &scr);
+  subSerialGlobalRegEnable(_subSerialChannel, rst);
+  subSerialGlobalRegDisable(_subSerialChannel, clock);
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 void DFRobot_IICSerial::sleep() {}
