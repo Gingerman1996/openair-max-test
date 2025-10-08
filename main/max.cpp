@@ -331,9 +331,9 @@ extern "C" void app_main(void) {
   }
   sensor.prepareSleep();
 
-  gpio_sleep_set_direction(EN_PMS1, GPIO_MODE_OUTPUT)
-  gpio_sleep_set_direction(EN_PMS2, GPIO_MODE_OUTPUT)
-  gpio_sleep_set_direction(EN_CE_CARD, GPIO_MODE_OUTPUT)
+  gpio_sleep_set_direction(EN_PMS1, GPIO_MODE_OUTPUT);
+  gpio_sleep_set_direction(EN_PMS2, GPIO_MODE_OUTPUT);
+  gpio_sleep_set_direction(EN_CE_CARD, GPIO_MODE_OUTPUT);
 
   gpio_set_level(EN_PMS1, 0);
   gpio_set_level(EN_PMS2, 0);
@@ -413,7 +413,7 @@ void resetExtWatchdog() {
 void initGPIO() {
   // Initialize IOs configurations
 
-  ESP_LOG(TAG, "Initialize GPIOs");
+  ESP_LOGI(TAG, "Initialize GPIOs");
   gpio_config_t io_conf;
   io_conf.mode = GPIO_MODE_OUTPUT;
   io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
