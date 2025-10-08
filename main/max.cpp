@@ -330,6 +330,18 @@ extern "C" void app_main(void) {
     g_wifiManager.disconnect(true);
   }
   sensor.prepareSleep();
+
+  gpio_sleep_set_direction(EN_PMS1, GPIO_MODE_OUTPUT)
+  gpio_sleep_set_direction(EN_PMS2, GPIO_MODE_OUTPUT)
+  gpio_sleep_set_direction(EN_CE_CARD, GPIO_MODE_OUTPUT)
+
+  gpio_set_level(EN_PMS1, 0);
+  gpio_set_level(EN_PMS2, 0);
+  gpio_set_level(EN_CE_CARD, 0);
+
+  gpio_hold_en(EN_PMS1);
+  gpio_hold_en(EN_PMS2);
+  gpio_hold_en(EN_CE_CARD);
   // Reset external watchdog before sleep to make sure its not trigger while in sleep
   //   before system wakeup
   resetExtWatchdog();
@@ -400,15 +412,20 @@ void resetExtWatchdog() {
 
 void initGPIO() {
   // Initialize IOs configurations
+
+  ESP_LOG(TAG, "Initialize GPIOs");
   gpio_config_t io_conf;
   io_conf.mode = GPIO_MODE_OUTPUT;
   io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
   io_conf.intr_type = GPIO_INTR_DISABLE;
   if (xWakeUpCounter == 0) {
     io_conf.pin_bit_mask = (1ULL << IO_WDT) | (1ULL << EN_PMS1) | (1ULL << EN_PMS2) |
                            (1ULL << EN_CO2) | (1ULL << EN_CE_CARD) | (1ULL << EN_ALPHASENSE);
   } else {
+    gpio_hold_dis(EN_PMS1);
+    gpio_hold_dis(EN_PMS2);
+    gpio_hold_dis(EN_CE_CARD);
     // Ignore CO2 and Alphasense load switch IO since the state already retained
     io_conf.pin_bit_mask =
         (1ULL << IO_WDT) | (1ULL << EN_PMS1) | (1ULL << EN_PMS2) | (1ULL << EN_CE_CARD);
