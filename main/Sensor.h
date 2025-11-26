@@ -12,7 +12,6 @@
 #include "AirgradientUART.h"
 #include "BQ25672.h"
 #include "PMS.h"
-#include "DGSx.h"
 #include "Sunlight.h"
 #include "airgradientClient.h"
 #include "sht4x.h"
@@ -54,7 +53,6 @@ private:
   int _no2WEIterationOkCount = 0;
   int _no2AEIterationOkCount = 0;
   int _afeTempIterationOkCount = 0;
-  int _dgsxIterationOkCount = 0; // DGSx gas concentration iteration count
   AirgradientClient::MaxSensorPayload _averageMeasure;
   i2c_master_bus_handle_t _busHandle;
 
@@ -69,10 +67,6 @@ private:
   bool _pms2Available = true;
   AirgradientSerial *agsPM2_ = nullptr;
   PMS *pms2_ = nullptr;
-
-  bool _dgsxAvailable = true;
-  AirgradientSerial *agsDGSx_ = nullptr;
-  DGSx *dgsx_ = nullptr;
 
   bool _chargerAvailable = true;
   BQ25672 *charger_ = nullptr;

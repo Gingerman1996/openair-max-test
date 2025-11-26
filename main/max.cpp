@@ -15,6 +15,7 @@
 #include "airgradientOtaWifi.h"
 #include "airgradientWifiClient.h"
 #include "esp_console.h"
+#include "argtable3/argtable3.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_system.h"
@@ -69,10 +70,45 @@ static AirgradientClient *g_agClient = nullptr;
 static WiFiManager g_wifiManager;
 
 static QueueHandle_t bootButtonQueue = NULL;
+static TaskHandle_t watchdogTaskHandle = NULL;
+static volatile bool watchdogTaskActive = false;
+
 static void IRAM_ATTR bootButtonISRHandler(void *arg) {
   (void)arg;
   int level = gpio_get_level(IO_BOOT_BUTTON);
   xQueueSendFromISR(bootButtonQueue, &level, NULL);
+}
+
+/**
+ * Reset monitor external watchdog timer
+ */
+static void resetExtWatchdog() {
+  // Toggle the watchdog pin to reset external watchdog
+  gpio_set_level(IO_WDT, 0);
+  vTaskDelay(pdMS_TO_TICKS(10)); // Hold low for 10ms
+  gpio_set_level(IO_WDT, 1);
+}
+
+/**
+ * Watchdog reset task that runs in background
+ */
+static void watchdogResetTask(void *pvParameters) {
+  const TickType_t watchdog_interval = pdMS_TO_TICKS(5 * 60 * 1000); // 5 minutes
+  int reset_count = 0;
+  
+  ESP_LOGI(TAG, "Watchdog reset task started - will reset every 5 minutes");
+  
+  while (watchdogTaskActive) {
+    vTaskDelay(watchdog_interval);
+    if (watchdogTaskActive) {
+      resetExtWatchdog();
+      reset_count++;
+      ESP_LOGI(TAG, "Background watchdog reset #%d (%.1f minutes)", reset_count, reset_count * 5.0f);
+    }
+  }
+  
+  ESP_LOGI(TAG, "Watchdog reset task stopping (performed %d resets)", reset_count);
+  vTaskDelete(NULL);
 }
 
 /**
@@ -87,10 +123,14 @@ static void bootButtonTask(void *arg);
 static void initBootButton();
 
 /**
- * Reset monitor external watchdog timer
- *   with assumption GPIO already initialized before calling this function
+ * Start background watchdog reset task
  */
-static void resetExtWatchdog();
+static void startWatchdogTask();
+
+/**
+ * Stop background watchdog reset task
+ */
+static void stopWatchdogTask();
 
 /**
  * Helper to print system reset reason
@@ -119,6 +159,7 @@ static int getNetworkSignalStrength();
 static bool initializeNetwork(unsigned long wakeUpCounter);
 static bool initializeWiFiNetwork(unsigned long wakeUpCounter);
 static bool initializeCellularNetwork(unsigned long wakeUpCounter);
+static bool initializeCellularForGnss(unsigned long wakeUpCounter);
 
 static bool checkRemoteConfiguration(unsigned long wakeUpCounter);
 static bool checkForFirmwareUpdate(unsigned long wakeUpCounter);
@@ -126,6 +167,24 @@ static bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &pa
 static bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
                                AirgradientClient::MaxSensorPayload sensorPayload);
 static bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCache);
+
+// GNSS test commands
+static int gnss_init_cmd(int argc, char **argv);
+static int gnss_start_cmd(int argc, char **argv);
+static int gnss_stop_cmd(int argc, char **argv);
+static int gnss_location_cmd(int argc, char **argv);
+static int gnss_test_cmd(int argc, char **argv);
+static int gnss_hotstart_cmd(int argc, char **argv);
+static int gnss_coldstart_cmd(int argc, char **argv);
+static int gnss_agps_cmd(int argc, char **argv);
+static int gnss_monitor_cmd(int argc, char **argv);
+static int gnss_info_cmd(int argc, char **argv);
+static int gnss_gpsinfo_cmd(int argc, char **argv);
+static int gnss_antenna_cmd(int argc, char **argv);
+static int gnss_satellite_cmd(int argc, char **argv);
+static int gnss_signal_cmd(int argc, char **argv);
+static void register_gnss_commands();
+static void runGnssOnlyMode(int wakeUpCounter);
 
 extern "C" void app_main(void) {
   // Re-initialize console for logging only if it just wake up after deepsleep
@@ -146,6 +205,9 @@ extern "C" void app_main(void) {
     // Initialize boot button event handler only on the first boot
     // So on next boot onwards, boot button will not function
     initBootButton();
+    
+    // Register console commands for GNSS testing on first boot only
+    register_gnss_commands();
   }
 
   // Initialize NVS
@@ -157,7 +219,6 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(ret);
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  uint32_t wakeUpMillis = MILLIS() - 1000; // minus with previous delay
   ESP_LOGI(TAG, "MAX!");
 
   g_statusLed.start();
@@ -233,144 +294,109 @@ extern "C" void app_main(void) {
 
     // Wifi is ready from the start
     g_networkReady = true;
-    // Starting time for every cycle should start now because time taken by system settings portal
-    wakeUpMillis = MILLIS();
   }
 
   // Reset external WDT
   resetExtWatchdog();
 
-  ESP_LOGI(TAG, "Wait for sensors to warmup before initialization");
-  vTaskDelay(pdMS_TO_TICKS(2000));
+  ESP_LOGI(TAG, "Starting GNSS-only mode (skip sensors, networking, and deep sleep)");
 
-  // Turn ON both PMS and AlphaSense sensor load switch
-  gpio_set_level(EN_PMS1, 1);
-  vTaskDelay(pdMS_TO_TICKS(100));
-  gpio_set_level(EN_PMS2, 1);
-  vTaskDelay(pdMS_TO_TICKS(2000));
-
-  // Configure I2C master bus
-  i2c_master_bus_config_t bus_cfg = {
-      .i2c_port = I2C_MASTER_PORT,
-      .sda_io_num = (gpio_num_t)I2C_MASTER_SDA_IO,
-      .scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO,
-      .clk_source = I2C_CLK_SRC_DEFAULT,
-      .glitch_ignore_cnt = 7,
-      // .flags.enable_internal_pullup = true,
-  };
-  bus_cfg.flags.enable_internal_pullup = true;
-  i2c_master_bus_handle_t bus_handle;
-  ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
-
-  Sensor sensor(bus_handle);
-  if (sensor.init(g_configuration.getModel(), g_configuration.getABCDays()) == false) {
-    g_statusLed.blinkAsync(2000, 500);
-    ESP_LOGW(
-        TAG,
-        "One or more sensor were failed to initialize, will not measure those on this iteration");
-  }
-
-  if (g_configuration.isCO2CalibrationRequested()) {
-    sensor.co2AttemptManualCalibration();
-    g_configuration.resetCO2CalibrationRequest();
-  }
-
-  // Start measure sensor sequence
-  // sensor.startMeasures(DEFAULT_MEASURE_ITERATION_COUNT, DEFAULT_MEASURE_INTERVAL_MS_PER_ITERATION);
-  // sensor.printMeasures();
-  // auto averageMeasures = sensor.getLastAverageMeasure();
-
-  // Create mock sensor data for testing
-  AirgradientClient::MaxSensorPayload averageMeasures;
-  averageMeasures.rco2 = 420;                      // CO2 in ppm (normal ambient level)
-  averageMeasures.particleCount003 = 1500;        // Particle count 0.3μm
-  averageMeasures.pm01 = 8.5f;                     // PM1.0 μg/m³
-  averageMeasures.pm25 = 12.3f;                    // PM2.5 μg/m³
-  averageMeasures.pm10 = 18.7f;                    // PM10 μg/m³
-  averageMeasures.tvocRaw = 25000;                 // TVOC raw value
-  averageMeasures.noxRaw = 18000;                  // NOx raw value
-  averageMeasures.atmp = 25.4f;                    // Temperature in °C
-  averageMeasures.rhum = 65.2f;                    // Humidity in %
-  averageMeasures.vBat = 12.67f;                   // Battery voltage (from actual log)
-  averageMeasures.vPanel = 4.67f;                  // Solar panel voltage (from actual log)
-  averageMeasures.o3WorkingElectrode = 1.25f;      // O3 working electrode mV
-  averageMeasures.o3AuxiliaryElectrode = 1.18f;    // O3 auxiliary electrode mV
-  averageMeasures.no2WorkingElectrode = 0.85f;     // NO2 working electrode mV
-  averageMeasures.no2AuxiliaryElectrode = 0.92f;   // NO2 auxiliary electrode mV
-  averageMeasures.afeTemp = 26.1f;                 // AFE temperature mV
-  averageMeasures.dgsxGasConcentration = 0.0f;     // DGSx gas concentration PPB (sensor timeout)
-
-  // Turn OFF PM sensor load switch
-  gpio_set_level(EN_PMS1, 0);
-  gpio_set_level(EN_PMS2, 0);
-  vTaskDelay(pdMS_TO_TICKS(1000));
-
-  // Optimization: copy from LP memory so will not always call from LP memory
   int wakeUpCounter = xWakeUpCounter;
+  runGnssOnlyMode(wakeUpCounter);
+  return;
+}
 
-  if (g_configuration.getNetworkOption() == NetworkOption::Cellular) {
-    // Attempt send post through HTTP first
-    // If success and send measures through MQTT not enabled, then clean the cache while make sure xHttpCacheQueueIndex reset
-    // Attempt send measures through MQTT if its enabled
-    PayloadCache payloadCache(MAX_PAYLOAD_CACHE);
-    payloadCache.push(&averageMeasures);
-    bool success = sendMeasuresByCellular(wakeUpCounter, payloadCache);
-    if (success) {
-      if (g_configuration.getMqttBrokerUrl().empty()) {
-        ESP_LOGI(TAG, "MQTT is not enabled, skip");
-        payloadCache.clean();
-        xHttpCacheQueueIndex = 0;
-      } else {
-        sendMeasuresUsingMqtt(wakeUpCounter, payloadCache);
-      }
+static void runGnssOnlyMode(int wakeUpCounter) {
+  ESP_LOGI(TAG, "Entering GNSS-only mode loop");
+
+  if (g_configuration.getNetworkOption() != NetworkOption::Cellular) {
+    ESP_LOGW(TAG, "Device configured for non-cellular operation, continuing with cellular GNSS mode");
+  }
+
+  if (!initializeCellularForGnss(wakeUpCounter)) {
+    ESP_LOGE(TAG, "Failed to initialize cellular network; unable to proceed with GNSS mode");
+    while (true) {
+      resetExtWatchdog();
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
-  } else {
-    sendMeasuresByWiFi(wakeUpCounter, averageMeasures);
-  }
-  checkRemoteConfiguration(wakeUpCounter);
-  checkForFirmwareUpdate(wakeUpCounter);
-
-  // If led test requested, keep led ON until its power cycled
-  if (g_configuration.isLedTestRequested()) {
-    g_statusLed.on();
-    g_statusLed.holdState();
   }
 
-  // Turn of network network
-  if (g_configuration.getNetworkOption() == NetworkOption::Cellular) {
-    // Only poweroff when all transmission attempt is done
-    if (g_ceAgSerial != nullptr || g_networkReady) {
-      g_cellularCard->powerOff();
+  auto *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
+  if (a7672xx == nullptr) {
+    ESP_LOGE(TAG, "Cellular module instance missing; aborting GNSS mode");
+    while (true) {
+      resetExtWatchdog();
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    // Turn OFF Cellular Card load switch
-    gpio_set_level(EN_CE_CARD, 0);
+  }
+
+  while (true) {
+    auto status = a7672xx->gnssInit();
+    if (status == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS initialization successful");
+      break;
+    }
+    ESP_LOGE(TAG, "GNSS initialization failed (status=%d), retrying...", static_cast<int>(status));
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+
+  while (true) {
+    auto status = a7672xx->gnssStart();
+    if (status == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS positioning started");
+      break;
+    }
+    ESP_LOGE(TAG, "Failed to start GNSS positioning (status=%d), retrying...", static_cast<int>(status));
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+
+  auto agpsStatus = a7672xx->gnssEnableAGPS();
+  if (agpsStatus == CellReturnStatus::Ok) {
+    ESP_LOGI(TAG, "AGPS assistance request succeeded");
   } else {
-    g_wifiManager.disconnect(true);
+    ESP_LOGW(TAG, "AGPS assistance request failed (status=%d)", static_cast<int>(agpsStatus));
   }
 
-  // Reset external watchdog before sleep to make sure its not trigger while in sleep
-  //   before system wakeup
-  resetExtWatchdog();
-
-  // Calculate how long to sleep to keep measurement cycle the same
-  uint32_t aliveTimeSpendMillis = MILLIS() - wakeUpMillis;
-  int toSleepMs = (g_configuration.getConfigSchedule().pm02 * 1000) - aliveTimeSpendMillis;
-  if (toSleepMs < 0) {
-    // TODO: if its 0 means, no need to sleep, right? if so need to move to loop
-    toSleepMs = 0;
+  bool antennaOk = false;
+  auto antennaStatus = a7672xx->gnssCheckAntenna(antennaOk);
+  if (antennaStatus == CellReturnStatus::Ok) {
+    ESP_LOGI(TAG, "GNSS antenna status: %s", antennaOk ? "OK" : "Open/Short detected");
+  } else if (antennaStatus == CellReturnStatus::Failed) {
+    ESP_LOGW(TAG, "Unable to interpret GNSS antenna status response");
+  } else {
+    ESP_LOGW(TAG, "Failed to query GNSS antenna status (status=%d)",
+             static_cast<int>(antennaStatus));
   }
-  ESP_LOGI(TAG, "Will sleep for %dms", toSleepMs);
-  esp_sleep_enable_timer_wakeup(toSleepMs * 1000);
-  vTaskDelay(pdMS_TO_TICKS(1000));
 
-  g_statusLed.off();
+  ESP_LOGI(TAG, "GNSS module ready; continuously reading GNSS data (no deep sleep)");
 
-  esp_deep_sleep_start();
+  while (true) {
+    auto info = a7672xx->gnssGetInfo();
+    if (info.status == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS Fix: %s", info.data.c_str());
+    } else if (info.status == CellReturnStatus::Failed) {
+      ESP_LOGW(TAG, "GNSS fix not yet available");
+    } else if (info.status == CellReturnStatus::Timeout) {
+      ESP_LOGW(TAG, "Timed out waiting for GNSS info");
+    } else {
+      ESP_LOGE(TAG, "Error reading GNSS info (status=%d)", static_cast<int>(info.status));
+    }
 
-  // Will never go here
+    auto signal = a7672xx->gnssGetSignalStrength();
+    if (signal.status == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS Signal: %s", signal.data.c_str());
+    } else if (signal.status == CellReturnStatus::Failed) {
+      ESP_LOGW(TAG, "GNSS signal strength unavailable");
+    } else if (signal.status == CellReturnStatus::Timeout) {
+      ESP_LOGW(TAG, "Timed out waiting for GNSS signal data");
+    } else {
+      ESP_LOGE(TAG, "Error reading GNSS signal data (status=%d)", static_cast<int>(signal.status));
+    }
 
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(10));
+    resetExtWatchdog();
+
+    // Short delay prevents AT command flooding while keeping the device awake
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
 
@@ -409,11 +435,46 @@ void initConsole() {
   ESP_ERROR_CHECK(esp_console_init(&console_config));
 }
 
-void resetExtWatchdog() {
-  ESP_LOGI(TAG, "Watchdog reset");
-  gpio_set_level(IO_WDT, 1);
-  vTaskDelay(pdMS_TO_TICKS(20));
-  gpio_set_level(IO_WDT, 0);
+void startWatchdogTask() {
+  if (watchdogTaskHandle != NULL) {
+    ESP_LOGW(TAG, "Watchdog task already running");
+    return;
+  }
+  
+  watchdogTaskActive = true;
+  BaseType_t result = xTaskCreate(
+    watchdogResetTask,
+    "watchdog_reset",
+    2048,
+    NULL,
+    5,  // Priority
+    &watchdogTaskHandle
+  );
+  
+  if (result == pdPASS) {
+    ESP_LOGI(TAG, "Watchdog reset task created successfully");
+  } else {
+    ESP_LOGE(TAG, "Failed to create watchdog reset task");
+    watchdogTaskActive = false;
+  }
+}
+
+void stopWatchdogTask() {
+  if (watchdogTaskHandle == NULL) {
+    ESP_LOGW(TAG, "Watchdog task not running");
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Stopping watchdog reset task...");
+  watchdogTaskActive = false;
+  
+  // Wait for task to finish
+  vTaskDelay(pdMS_TO_TICKS(100));
+  
+  // Reset handle
+  watchdogTaskHandle = NULL;
+  
+  ESP_LOGI(TAG, "Watchdog reset task stopped");
 }
 
 void initGPIO() {
@@ -664,6 +725,9 @@ bool initializeCellularNetwork(unsigned long wakeUpCounter) {
     return false;
   }
 
+  // Start watchdog reset task before initializing cellular
+  startWatchdogTask();
+
   // Enable CE card power
   gpio_set_level(EN_CE_CARD, 1);
   vTaskDelay(pdMS_TO_TICKS(100));
@@ -713,6 +777,46 @@ bool initializeCellularNetwork(unsigned long wakeUpCounter) {
 
   // Wait for a moment for CE card is ready for transmission
   vTaskDelay(pdMS_TO_TICKS(2000));
+
+  return true;
+}
+
+bool initializeCellularForGnss(unsigned long wakeUpCounter) {
+  if (g_cellularCard != nullptr) {
+    return true;
+  }
+
+  startWatchdogTask();
+
+  gpio_set_level(EN_CE_CARD, 1);
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  if (g_ceAgSerial == nullptr) {
+    g_ceAgSerial = new AirgradientUART();
+    if (!g_ceAgSerial->begin(UART_BAUD_PORT_CE_CARD, UART_BAUD_CE_CARD, UART_RX_CE_CARD,
+                             UART_TX_CE_CARD)) {
+      ESP_LOGE(TAG, "Failed to open serial port for cellular module (GNSS mode)");
+      delete g_ceAgSerial;
+      g_ceAgSerial = nullptr;
+      return false;
+    }
+  }
+
+  g_ceAgSerial->setDebug(true);
+
+  auto *module = new CellularModuleA7672XX(g_ceAgSerial, IO_CE_POWER);
+  if (!module->init()) {
+    ESP_LOGE(TAG, "Failed to initialize cellular module for GNSS mode");
+    g_ceAgSerial->setDebug(false);
+    delete module;
+    return false;
+  }
+
+  g_cellularCard = module;
+  g_ceAgSerial->setDebug(false);
+
+  // Allow module to settle
+  vTaskDelay(pdMS_TO_TICKS(500));
 
   return true;
 }
@@ -993,4 +1097,472 @@ bool checkRemoteConfiguration(unsigned long wakeUpCounter) {
   }
 
   return true;
+}
+
+// GNSS test command implementations
+static int gnss_init_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized. Please connect to cellular network first.\n");
+    return 1;
+  }
+
+  // Cast to A7672XX to access GNSS functions
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Initializing GNSS...\n");
+  auto result = a7672xx->gnssInit();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS initialized successfully\n");
+    return 0;
+  } else {
+    printf("Failed to initialize GNSS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_start_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized. Please run gnss_init first.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Starting GNSS positioning...\n");
+  auto result = a7672xx->gnssStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS positioning started successfully\n");
+    printf("NMEA data should now be streaming to UART port\n");
+    return 0;
+  } else {
+    printf("Failed to start GNSS positioning (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_stop_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Stopping GNSS...\n");
+  auto result = a7672xx->gnssStop();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS stopped successfully\n");
+    return 0;
+  } else {
+    printf("Failed to stop GNSS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_location_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Reading GNSS location...\n");
+  auto result = a7672xx->gnssGetLocation();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("Location: %s\n", result.data.c_str());
+    printf("Format: [mode],[GPS-SVs],[GLONASS-SVs],[BEIDOU-SVs],[lat],[N/S],[lon],[E/W],[date],[UTC-time],[alt],[speed],[course],[PDOP],[HDOP],[VDOP]\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("No GNSS fix available. Please wait for satellites to be acquired.\n");
+    return 1;
+  } else {
+    printf("Failed to read GNSS location (error: %d)\n", (int)result.status);
+    return 1;
+  }
+}
+
+static int gnss_test_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  struct {
+    struct arg_lit *enable;
+    struct arg_lit *disable;
+    struct arg_end *end;
+  } args;
+
+  args.enable = arg_lit0("e", "enable", "Enable GNSS test mode");
+  args.disable = arg_lit0("d", "disable", "Disable GNSS test mode");
+  args.end = arg_end(2);
+
+  void *argtable[] = {args.enable, args.disable, args.end};
+  
+  if (arg_parse(argc, argv, argtable) != 0) {
+    arg_print_errors(stderr, args.end, "gnss_test");
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+
+  bool enable = false;
+  if (args.enable->count > 0) {
+    enable = true;
+  } else if (args.disable->count > 0) {
+    enable = false;
+  } else {
+    printf("Usage: gnss_test [-e|--enable] [-d|--disable]\n");
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+
+  printf("%s GNSS test mode...\n", enable ? "Enabling" : "Disabling");
+  auto result = a7672xx->gnssTestMode(enable);
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS test mode %s successfully\n", enable ? "enabled" : "disabled");
+    if (enable) {
+      printf("Test mode will stream continuous GxGSV sentences to show satellite visibility\n");
+    }
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 0;
+  } else {
+    printf("Failed to %s GNSS test mode (error: %d)\n", enable ? "enable" : "disable", (int)result);
+    arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
+    return 1;
+  }
+}
+
+static int gnss_monitor_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Starting GNSS 1-hour monitoring...\n");
+  printf("Background watchdog reset task should already be running.\n");
+  
+  // Start the 1-hour GNSS monitoring
+  auto result = a7672xx->gnssReadOneHour();
+  
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS 1-hour monitoring completed successfully\n");
+    return 0;
+  } else {
+    printf("GNSS 1-hour monitoring failed (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_hotstart_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Performing GNSS hot start...\n");
+  auto result = a7672xx->gnssHotStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS hot start completed successfully\n");
+    printf("Hot start uses latest available data for fastest acquisition\n");
+    return 0;
+  } else {
+    printf("Failed to perform GNSS hot start (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_coldstart_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Performing GNSS cold start...\n");
+  auto result = a7672xx->gnssColdStart();
+  if (result == CellReturnStatus::Ok) {
+    printf("GNSS cold start completed successfully\n");
+    printf("Cold start clears all assistance data and starts fresh acquisition\n");
+    return 0;
+  } else {
+    printf("Failed to perform GNSS cold start (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_agps_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Enabling AGPS assistance...\n");
+  auto result = a7672xx->gnssEnableAGPS();
+  if (result == CellReturnStatus::Ok) {
+    printf("AGPS enabled successfully\n");
+    printf("AGPS provides assistance data to speed up satellite acquisition\n");
+    return 0;
+  } else if (result == CellReturnStatus::Failed) {
+    printf("AGPS request failed - check network connection\n");
+    return 1;
+  } else {
+    printf("Failed to enable AGPS (error: %d)\n", (int)result);
+    return 1;
+  }
+}
+
+static int gnss_info_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Getting GNSS info via AT+CGNSSINFO...\n");
+  auto result = a7672xx->gnssGetInfo();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("CGNSSINFO result: %s\n", result.data.c_str());
+    printf("This command returns complete GNSS navigation info\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("CGNSSINFO request failed\n");
+    return 1;
+  } else {
+    printf("CGNSSINFO request timed out\n");
+    return 1;
+  }
+}
+
+static int gnss_gpsinfo_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Getting GPS info via AT+CGPSINFO...\n");
+  auto result = a7672xx->gnssGetGPSInfo();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("CGPSINFO result: %s\n", result.data.c_str());
+    printf("This command returns GPS-specific position info\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("CGPSINFO request failed\n");
+    return 1;
+  } else {
+    printf("CGPSINFO request timed out\n");
+    return 1;
+  }
+}
+
+static int gnss_antenna_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Getting GNSS antenna info via AT+CGNSSANT...\n");
+  auto result = a7672xx->gnssGetAntennaInfo();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("CGNSSANT result: %s\n", result.data.c_str());
+    printf("This shows antenna detection status\n");
+    printf("0=antenna open, 1=antenna short, 2=antenna normal\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("CGNSSANT request failed\n");
+    return 1;
+  } else {
+    printf("CGNSSANT request timed out\n");
+    return 1;
+  }
+}
+
+static int gnss_satellite_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Getting satellite info via AT+CGNSSSAT...\n");
+  auto result = a7672xx->gnssGetSatelliteInfo();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("CGNSSSAT result: %s\n", result.data.c_str());
+    printf("This shows visible satellites and their signal strength\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("CGNSSSAT request failed\n");
+    return 1;
+  } else {
+    printf("CGNSSSAT request timed out\n");
+    return 1;
+  }
+}
+
+static int gnss_signal_cmd(int argc, char **argv) {
+  if (g_cellularCard == nullptr) {
+    printf("Error: Cellular module not initialized.\n");
+    return 1;
+  }
+
+  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+
+  printf("Getting GNSS signal strength via AT+CGNSSISR...\n");
+  auto result = a7672xx->gnssGetSignalStrength();
+  if (result.status == CellReturnStatus::Ok) {
+    printf("CGNSSISR result: %s\n", result.data.c_str());
+    printf("This shows GNSS signal strength and quality\n");
+    return 0;
+  } else if (result.status == CellReturnStatus::Failed) {
+    printf("CGNSSISR request failed\n");
+    return 1;
+  } else {
+    printf("CGNSSISR request timed out\n");
+    return 1;
+  }
+}
+
+static void register_gnss_commands() {
+  const esp_console_cmd_t gnss_init = {
+    .command = "gnss_init",
+    .help = "Initialize GNSS module",
+    .hint = NULL,
+    .func = &gnss_init_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_init));
+
+  const esp_console_cmd_t gnss_start = {
+    .command = "gnss_start",
+    .help = "Start GNSS positioning",
+    .hint = NULL,
+    .func = &gnss_start_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_start));
+
+  const esp_console_cmd_t gnss_stop = {
+    .command = "gnss_stop",
+    .help = "Stop GNSS positioning",
+    .hint = NULL,
+    .func = &gnss_stop_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_stop));
+
+  const esp_console_cmd_t gnss_location = {
+    .command = "gnss_location",
+    .help = "Get current GNSS location",
+    .hint = NULL,
+    .func = &gnss_location_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_location));
+
+  const esp_console_cmd_t gnss_test = {
+    .command = "gnss_test",
+    .help = "Enable/disable GNSS test mode",
+    .hint = "[-e|--enable] [-d|--disable]",
+    .func = &gnss_test_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_test));
+
+  const esp_console_cmd_t gnss_hotstart = {
+    .command = "gnss_hotstart",
+    .help = "Perform GNSS hot start",
+    .hint = NULL,
+    .func = &gnss_hotstart_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_hotstart));
+
+  const esp_console_cmd_t gnss_coldstart = {
+    .command = "gnss_coldstart",
+    .help = "Perform GNSS cold start",
+    .hint = NULL,
+    .func = &gnss_coldstart_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_coldstart));
+
+  const esp_console_cmd_t gnss_agps = {
+    .command = "gnss_agps",
+    .help = "Enable AGPS assistance",
+    .hint = NULL,
+    .func = &gnss_agps_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_agps));
+
+  const esp_console_cmd_t gnss_info = {
+    .command = "gnss_info",
+    .help = "Get GNSS info via AT+CGNSSINFO",
+    .hint = NULL,
+    .func = &gnss_info_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_info));
+
+  const esp_console_cmd_t gnss_gpsinfo = {
+    .command = "gnss_gpsinfo",
+    .help = "Get GPS info via AT+CGPSINFO",
+    .hint = NULL,
+    .func = &gnss_gpsinfo_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_gpsinfo));
+
+  const esp_console_cmd_t gnss_antenna = {
+    .command = "gnss_antenna",
+    .help = "Check GNSS antenna status via AT+CGNSSANT",
+    .hint = NULL,
+    .func = &gnss_antenna_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_antenna));
+
+  const esp_console_cmd_t gnss_satellite = {
+    .command = "gnss_satellite",
+    .help = "Get satellite info via AT+CGNSSSAT",
+    .hint = NULL,
+    .func = &gnss_satellite_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_satellite));
+
+  const esp_console_cmd_t gnss_signal = {
+    .command = "gnss_signal",
+    .help = "Get GNSS signal strength via AT+CGNSSISR",
+    .hint = NULL,
+    .func = &gnss_signal_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_signal));
+
+  const esp_console_cmd_t gnss_monitor = {
+    .command = "gnss_monitor",
+    .help = "Monitor GNSS for 1 hour with watchdog reset every 5 minutes",
+    .hint = NULL,
+    .func = &gnss_monitor_cmd,
+  };
+  ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_monitor));
+
+  printf("GNSS test commands registered:\n");
+  printf("  gnss_init      - Initialize GNSS module\n");
+  printf("  gnss_start     - Start GNSS positioning\n");
+  printf("  gnss_stop      - Stop GNSS positioning\n");
+  printf("  gnss_location  - Get current location\n");
+  printf("  gnss_test      - Enable/disable test mode\n");
+  printf("  gnss_hotstart  - Perform hot start\n");
+  printf("  gnss_coldstart - Perform cold start\n");
+  printf("  gnss_agps      - Enable AGPS assistance\n");
+  printf("  gnss_info      - Get GNSS info via AT+CGNSSINFO\n");
+  printf("  gnss_gpsinfo   - Get GPS info via AT+CGPSINFO\n");
+  printf("  gnss_antenna   - Check GNSS antenna status\n");
+  printf("  gnss_satellite - Get satellite information\n");
+  printf("  gnss_signal    - Get GNSS signal strength\n");
+  printf("  gnss_monitor   - Monitor GNSS for 1 hour with WD reset\n");
 }
