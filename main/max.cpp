@@ -399,63 +399,42 @@ static void runGnssOnlyMode(int wakeUpCounter) {
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 
-  while (true) {
-    auto status = a7672xx->gnssStart();
-    if (status == CellReturnStatus::Ok) {
-      ESP_LOGI(TAG, "GNSS positioning started");
-      break;
-    }
-    ESP_LOGE(TAG, "Failed to start GNSS positioning (status=%d), retrying...", static_cast<int>(status));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-  }
-
-  auto agpsStatus = a7672xx->gnssEnableAGPS();
-  if (agpsStatus == CellReturnStatus::Ok) {
-    ESP_LOGI(TAG, "AGPS assistance request succeeded");
+  // Follow required sequence: power on, set mode/NMEA (in gnssInit), cold start, then continue
+  auto coldStatus = a7672xx->gnssColdStart();
+  if (coldStatus == CellReturnStatus::Ok) {
+    ESP_LOGI(TAG, "GNSS cold start issued");
   } else {
-    ESP_LOGW(TAG, "AGPS assistance request failed (status=%d)", static_cast<int>(agpsStatus));
-  }
-
-  bool antennaOk = false;
-  auto antennaStatus = a7672xx->gnssCheckAntenna(antennaOk);
-  if (antennaStatus == CellReturnStatus::Ok) {
-    ESP_LOGI(TAG, "GNSS antenna status: %s", antennaOk ? "OK" : "Open/Short detected");
-  } else if (antennaStatus == CellReturnStatus::Failed) {
-    ESP_LOGW(TAG, "Unable to interpret GNSS antenna status response");
-  } else {
-    ESP_LOGW(TAG, "Failed to query GNSS antenna status (status=%d)",
-             static_cast<int>(antennaStatus));
+    ESP_LOGW(TAG, "GNSS cold start failed (status=%d)", static_cast<int>(coldStatus));
   }
 
   ESP_LOGI(TAG, "GNSS module ready; continuously reading GNSS data (no deep sleep)");
+
+  // Reset external watchdog every 5 minutes while sampling GNSS once per second
+  constexpr int kWatchdogResetIntervalSec = 5 * 60;
+  int secondsSinceWatchdogReset = 0;
 
   while (true) {
     auto info = a7672xx->gnssGetInfo();
     if (info.status == CellReturnStatus::Ok) {
       ESP_LOGI(TAG, "GNSS Fix: %s", info.data.c_str());
     } else if (info.status == CellReturnStatus::Failed) {
-      ESP_LOGW(TAG, "GNSS fix not yet available");
+      ESP_LOGW(TAG, "GNSS fix not yet available (last response: %s)",
+               info.data.empty() ? "<empty>" : info.data.c_str());
     } else if (info.status == CellReturnStatus::Timeout) {
       ESP_LOGW(TAG, "Timed out waiting for GNSS info");
     } else {
-      ESP_LOGE(TAG, "Error reading GNSS info (status=%d)", static_cast<int>(info.status));
+      ESP_LOGE(TAG, "Error reading GNSS info (status=%d, last response: %s)",
+               static_cast<int>(info.status),
+               info.data.empty() ? "<empty>" : info.data.c_str());
     }
 
-    auto signal = a7672xx->gnssGetSignalStrength();
-    if (signal.status == CellReturnStatus::Ok) {
-      ESP_LOGI(TAG, "GNSS Signal: %s", signal.data.c_str());
-    } else if (signal.status == CellReturnStatus::Failed) {
-      ESP_LOGW(TAG, "GNSS signal strength unavailable");
-    } else if (signal.status == CellReturnStatus::Timeout) {
-      ESP_LOGW(TAG, "Timed out waiting for GNSS signal data");
-    } else {
-      ESP_LOGE(TAG, "Error reading GNSS signal data (status=%d)", static_cast<int>(signal.status));
+    secondsSinceWatchdogReset++;
+    if (secondsSinceWatchdogReset >= kWatchdogResetIntervalSec) {
+      resetExtWatchdog();
+      secondsSinceWatchdogReset = 0;
     }
-
-    resetExtWatchdog();
-
-    // Short delay prevents AT command flooding while keeping the device awake
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    // Sample GNSS once per second
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 

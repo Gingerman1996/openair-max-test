@@ -19,6 +19,11 @@ enum class NetworkOption {
 
 #define MILLIS() ((uint32_t)(esp_timer_get_time() / 1000))
 
+// Set to 1 to run minimal GNSS-only loop (power GNSS, read every second, watchdog every 5 minutes)
+#ifndef ENABLE_GNSS_MINIMAL_LOOP
+#define ENABLE_GNSS_MINIMAL_LOOP 1
+#endif
+
 constexpr gpio_num_t EN_CO2 = GPIO_NUM_5;
 constexpr gpio_num_t EN_PMS1 = GPIO_NUM_3;
 constexpr gpio_num_t EN_PMS2 = GPIO_NUM_22;
