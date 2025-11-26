@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include "airgradientOtaWifi.h"
 #include "airgradientWifiClient.h"
+#include "esp_attr.h"
 #include "esp_console.h"
 #include "argtable3/argtable3.h"
 #include "driver/usb_serial_jtag.h"
@@ -53,9 +54,17 @@
 // Wake up counter that saved on Low Power memory
 RTC_DATA_ATTR unsigned long xWakeUpCounter = 0;
 
+// Hold lead time of the next measurement schedule
+// Help in the process of fragmented sleep
+RTC_DATA_ATTR int xMeasurementLeadTimeSeconds = 0;
+
 // Hold the index of measures queue on which http post should start send measures
 // eg. xHttpCacheQueueIndex = 3, then for [q1, q2, q3, q4, q5, q6] should only send q4, q5, q6
 RTC_DATA_ATTR unsigned long xHttpCacheQueueIndex = 0;
+
+// Hold the previous wake up cycle measure interval
+// Help to check if there's a measure interval change that make previous payload cache invalid
+RTC_DATA_ATTR int xMeasureInterval = 180;
 
 // Global Vars
 static const char *const TAG = "APP";
@@ -133,6 +142,22 @@ static void startWatchdogTask();
 static void stopWatchdogTask();
 
 /**
+ * Define measure interval based on battery level
+ */
+static int getMeasureInterval(float batteryVoltage);
+
+/**
+ * Calculate the next measurement schedule
+ */
+static int calculateMeasurementSchedule(uint32_t startTimeMs, int measureInterval);
+
+/**
+ * Calculate how long the monitor should sleep
+ * Because there's a hardware watchdog if measurement more than 15, it needs wakeup for a moment to reset watchdog
+ */
+static int setWakeUpTimer(int nextMeasurementScheduleSec);
+
+/**
  * Helper to print system reset reason
  */
 static void printResetReason();
@@ -163,7 +188,8 @@ static bool initializeCellularForGnss(unsigned long wakeUpCounter);
 
 static bool checkRemoteConfiguration(unsigned long wakeUpCounter);
 static bool checkForFirmwareUpdate(unsigned long wakeUpCounter);
-static bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache);
+static bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache,
+                                   int measureInterval);
 static bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
                                AirgradientClient::MaxSensorPayload sensorPayload);
 static bool sendMeasuresUsingMqtt(unsigned long wakeUpCounter, PayloadCache &payloadCache);
@@ -191,15 +217,45 @@ extern "C" void app_main(void) {
   esp_sleep_wakeup_cause_t wakeUpReason = esp_sleep_get_wakeup_cause();
   if (wakeUpReason != ESP_SLEEP_WAKEUP_UNDEFINED) {
     initConsole();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // Check if its not the time to do measurements
+    if (xMeasurementLeadTimeSeconds > 0) {
+      int nextMeasurementScheduleSeconds = xMeasurementLeadTimeSeconds;
+      ESP_LOGI(TAG, "Next measurements is in %d seconds", nextMeasurementScheduleSeconds);
+
+      // Set the wakeup timer
+      int sleepDurationSeconds = setWakeUpTimer(nextMeasurementScheduleSeconds);
+      xMeasurementLeadTimeSeconds = nextMeasurementScheduleSeconds - sleepDurationSeconds;
+      ESP_LOGI(TAG, "Sleeping for %d seconds", sleepDurationSeconds);
+
+      // Reset external watchdog timer before sleep to make sure its not trigger while in sleep
+      //   before system wakeup
+      initGPIO();
+      resetExtWatchdog();
+
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      esp_deep_sleep_start();
+      // Will not continue here
+      // This process is not considered wake up, hence xWakeUpCounter not incremented
+    }
+
     ++xWakeUpCounter;
-    ESP_LOGI(TAG, "Wakeup count: %lu", xWakeUpCounter);
   }
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  ESP_LOGI(TAG, "Wakeup count: %lu", xWakeUpCounter);
   printResetReason();
   printWakeupReason(wakeUpReason);
 
+  ESP_LOGI(TAG, "MAX!");
+
+  // Indicate wake up time
+  uint32_t wakeUpTimeMs = 0;
+
   // Initialize every peripheral GPIOs to OFF state
   initGPIO();
+
+  // Reset external WDT
+  resetExtWatchdog();
 
   if (xWakeUpCounter == 0) {
     // Initialize boot button event handler only on the first boot
@@ -220,7 +276,6 @@ extern "C" void app_main(void) {
   vTaskDelay(pdMS_TO_TICKS(100));
 
   ESP_LOGI(TAG, "MAX!");
-
   g_statusLed.start();
   if (xWakeUpCounter == 0) {
     // Only turn on led indicator when it just powered on, not wakeup from sleep
@@ -253,6 +308,7 @@ extern "C" void app_main(void) {
       settings.networkMode = NETWORK_MODE_WIFI_STR;
     }
     settings.apn = g_configuration.getAPN();
+    settings.httpDomain = g_configuration.getHttpDomain();
     g_wifiManager.setSettings(settings);
 
     // Run portal
@@ -276,6 +332,7 @@ extern "C" void app_main(void) {
     auto config = g_configuration.get();
     config.runSystemSettings = false;
     settings = g_wifiManager.getSettings();
+    config.httpDomain = settings.httpDomain;
     if (settings.networkMode == NETWORK_MODE_CELLULAR_STR) {
       config.networkOption = NetworkOption::Cellular;
       config.apn = settings.apn;
@@ -294,6 +351,8 @@ extern "C" void app_main(void) {
 
     // Wifi is ready from the start
     g_networkReady = true;
+    // Starting time for every cycle should start now because time taken by system settings portal
+    wakeUpTimeMs = MILLIS();
   }
 
   // Reset external WDT
@@ -644,6 +703,48 @@ std::string getFirmwareVersion() {
   return app_desc->version;
 }
 
+int getMeasureInterval(float batteryVoltage) {
+  // Define measurement schedule based on battery voltage to keep the monitor running longer
+  int measureInterval = g_configuration.getConfigSchedule().pm02;
+  if (batteryVoltage >= 0) {
+    if (batteryVoltage >= 10.0) {
+      // Do nothing, use default from configuration
+    } else if (batteryVoltage >= 9.5) {
+      measureInterval = 1800; // 30 minutes
+    } else {
+      measureInterval = 3600; // 60 minutes
+    }
+  }
+
+  return measureInterval;
+}
+
+int calculateMeasurementSchedule(uint32_t startTimeMs, int measureInterval) {
+  int aliveTimeSpendMs = MILLIS() - startTimeMs;
+
+  // Calculate time left for the next schedule to make consistent schedule
+  int nextScheduleSec = ((measureInterval * 1000) - aliveTimeSpendMs) / 1000;
+  if (nextScheduleSec < 0) {
+    nextScheduleSec = 0;
+  }
+
+  return nextScheduleSec;
+}
+
+int setWakeUpTimer(int nextMeasurementScheduleSec) {
+  int toSleepSeconds = nextMeasurementScheduleSec;
+  if (nextMeasurementScheduleSec > MAX_SLEEP_TIME) {
+    // If next measurement schedule is more than 10 minutes, then
+    /// sleep for 10 minutes only and wake up to only reset the external watchdog timer. Then sleep again
+    ESP_LOGI(TAG, "Next measurement is scheduled in more than 5 minutes. Will do fragmented sleep "
+                  "to reset the external watchdog timer before returning to sleep again");
+    toSleepSeconds = MAX_SLEEP_TIME;
+  }
+
+  esp_sleep_enable_timer_wakeup(toSleepSeconds * 1000000); // Convert to uS
+  return toSleepSeconds;
+}
+
 AirgradientClient::PayloadType getPayloadType() {
   if (g_configuration.getModel() == Configuration::O_M_1PPSTON_CE) {
     return AirgradientClient::MAX_WITH_O3_NO2;
@@ -753,6 +854,7 @@ bool initializeCellularNetwork(unsigned long wakeUpCounter) {
   // Initialize cellular card and client
   g_cellularCard = new CellularModuleA7672XX(g_ceAgSerial, IO_CE_POWER);
   g_agClient = new AirgradientCellularClient(g_cellularCard);
+  g_agClient->setHttpDomain(g_configuration.getHttpDomain());
 
   resetExtWatchdog();
 
@@ -835,7 +937,8 @@ bool initializeWiFiNetwork(unsigned long wakeUpCounter) {
   return true;
 }
 
-bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache) {
+bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCache,
+                            int measureInterval) {
   // Check if pass criteria to post measures
   if (wakeUpCounter != 0 && (wakeUpCounter % TRANSMIT_MEASUREMENTS_CYCLES) > 0) {
     ESP_LOGI(TAG, "Not the time to post measures by cellular network, skip");
@@ -865,7 +968,7 @@ bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCa
   // Structure payload
   AirgradientClient::AirgradientPayload payload;
   payload.sensor = &sensorPayload;
-  payload.measureInterval = g_configuration.getConfigSchedule().pm02;
+  payload.measureInterval = measureInterval;
   payload.signal = getNetworkSignalStrength();
   ESP_LOGI(TAG, "Signal strength: %d", payload.signal);
 
@@ -875,7 +978,8 @@ bool sendMeasuresByCellular(unsigned long wakeUpCounter, PayloadCache &payloadCa
 
   do {
     attemptCounter = attemptCounter + 1;
-    postSuccess = g_agClient->httpPostMeasures(payload);
+    postSuccess =
+        g_agClient->httpPostMeasures(payload, g_configuration.isExtendedPmMeasuresEnabled());
     if (postSuccess) {
       if (wakeUpCounter == 0) {
         // Notify post success only on first boot
@@ -938,15 +1042,17 @@ bool sendMeasuresByWiFi(unsigned long wakeUpCounter,
     return false;
   }
 
+  // Initialize airgrdaient client
   g_agClient = new AirgradientWifiClient;
   g_agClient->begin(g_serialNumber, getPayloadType());
+  g_agClient->setHttpDomain(g_configuration.getHttpDomain());
 
   AirgradientClient::AirgradientPayload payload;
   payload.sensor = &sensorPayload;
   payload.signal = getNetworkSignalStrength();
   ESP_LOGI(TAG, "Signal strength: %d", payload.signal);
 
-  bool postSuccess = g_agClient->httpPostMeasures(payload);
+  bool postSuccess = g_agClient->httpPostMeasures(payload, false);
   if (!postSuccess) {
     ESP_LOGE(TAG, "Send measures failed, retry in next schedule");
     // Run failed post led indicator

@@ -28,6 +28,8 @@
 #define NVS_KEY_SYSTEM_SETTINGS "sysset"
 #define NVS_KEY_APN "apn"
 #define NVS_KEY_MQTT_HOST "mqtt"
+#define NVS_KEY_HTTP_DOMAIN "dom"
+#define NVS_KEY_EXT_PM_MEASURES "extPmMeasures"
 
 bool Configuration::load() {
   // At first, set every configuration to default
@@ -62,6 +64,8 @@ void Configuration::_printConfig() {
   ESP_LOGI(TAG, "runSystemSettings: %d", _config.runSystemSettings);
   ESP_LOGI(TAG, "apn: %s", _config.apn.c_str());
   ESP_LOGI(TAG, "mqttBrokerUrl: %s", _config.mqttBrokerUrl.c_str());
+  ESP_LOGI(TAG, "httpDomain: %s", _config.httpDomain.c_str());
+  ESP_LOGI(TAG, "extendedPmMeasures: %d", _config.extendedPmMeasures);
   ESP_LOGI(TAG, "**** ****");
 }
 
@@ -218,6 +222,18 @@ bool Configuration::parseRemoteConfig(const std::string &config) {
     }
   }
 
+  // extendedPmMeasures
+  if (root["extendedPmMeasures"].is<bool>()) {
+    bool_val = root["extendedPmMeasures"].as<bool>();
+    if (_config.extendedPmMeasures != bool_val) {
+      ESP_LOGI(TAG, "extendedPmMeasures value changed to %d", bool_val);
+      _config.extendedPmMeasures = bool_val;
+      _configChanged = true;
+    }
+  } else {
+    ESP_LOGW(TAG, "extendedPmMeasures field not found or not a boolean");
+  }
+
   ESP_LOGI(TAG, "Finish parsing remote configuration");
 
   if (_configChanged) {
@@ -246,8 +262,8 @@ bool Configuration::_loadConfig() {
   }
 
   // ABC DAYS
-  uint16_t abcDays;
-  err = nvs_get_u16(handle, NVS_KEY_ABC_DAYS, &abcDays);
+  int16_t abcDays;
+  err = nvs_get_i16(handle, NVS_KEY_ABC_DAYS, &abcDays);
   if (err == ESP_OK) {
     _config.abcDays = abcDays;
   } else {
@@ -382,6 +398,31 @@ bool Configuration::_loadConfig() {
     ESP_LOGW(TAG, "Failed to get mqttBrokerUrl");
   }
 
+  // HTTP Domain
+  requiredSize = 0;
+  err = nvs_get_str(handle, NVS_KEY_HTTP_DOMAIN, NULL, &requiredSize);
+  if (err == ESP_OK) {
+    char *data = new char[requiredSize + 1];
+    memset(data, 0, requiredSize + 1);
+    err = nvs_get_str(handle, NVS_KEY_HTTP_DOMAIN, data, &requiredSize);
+    if (err == ESP_OK) {
+      _config.httpDomain = data;
+    } else {
+      ESP_LOGW(TAG, "Failed to get httpDomain");
+    }
+    delete[] data;
+  } else {
+    ESP_LOGW(TAG, "Failed to get httpDomain");
+  }
+
+  uint8_t extendedPmMeasures;
+  err = nvs_get_u8(handle, NVS_KEY_EXT_PM_MEASURES, &extendedPmMeasures);
+  if (err == ESP_OK) {
+    _config.extendedPmMeasures = extendedPmMeasures;
+  } else {
+    ESP_LOGW(TAG, "Failed to get extendedPmMeasures");
+  }
+
   // Close NVS
   nvs_close(handle);
 
@@ -404,7 +445,7 @@ bool Configuration::_saveConfig() {
   }
 
   // ABC DAYS
-  err = nvs_set_u16(handle, NVS_KEY_ABC_DAYS, _config.abcDays);
+  err = nvs_set_i16(handle, NVS_KEY_ABC_DAYS, _config.abcDays);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to save abcDays");
   }
@@ -469,6 +510,18 @@ bool Configuration::_saveConfig() {
     ESP_LOGW(TAG, "Failed to save mqttBrokerUrl");
   }
 
+  // HTTP Domain
+  err = nvs_set_str(handle, NVS_KEY_HTTP_DOMAIN, _config.httpDomain.c_str());
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to save httpDomain");
+  }
+
+  // Extended PM measures
+  err = nvs_set_u8(handle, NVS_KEY_EXT_PM_MEASURES, _config.extendedPmMeasures);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to save extendedPmMeasures");
+  }
+
   // Commit changes
   ESP_LOGI(TAG, "Commit changes to NVS");
   err = nvs_commit(handle);
@@ -517,6 +570,10 @@ std::string Configuration::getAPN() { return _config.apn; }
 
 std::string Configuration::getMqttBrokerUrl() { return _config.mqttBrokerUrl; }
 
+std::string Configuration::getHttpDomain() { return _config.httpDomain; }
+
+bool Configuration::isExtendedPmMeasuresEnabled() { return _config.extendedPmMeasures; }
+
 bool Configuration::set(Config config) {
   _config = config;
   _printConfig();
@@ -562,4 +619,6 @@ void Configuration::_setConfigToDefault() {
   _config.runSystemSettings = false;
   _config.apn = DEFAULT_AIRGRADIENT_APN;
   _config.mqttBrokerUrl = "";
+  _config.httpDomain = AIRGRADIENT_HTTP_DOMAIN;
+  _config.extendedPmMeasures = false;
 }

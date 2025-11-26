@@ -24,8 +24,7 @@
 RTC_DATA_ATTR static uint8_t rtc_samples_configured = 0;
 
 // CO2 sensor measurement samples configuration
-#define CO2_MEASUREMENT_SAMPLES                                                \
-  1 // Number of samples (1-1024), lower = less power consumption
+#define CO2_MEASUREMENT_SAMPLES 1 // Number of samples (1-1024), lower = less power consumption
 
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 #include "esp_log.h"
@@ -38,8 +37,7 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
 
   // Sunlight sensor
   agsCO2_ = new AirgradientUART();
-  if (!agsCO2_->begin(UART_PORT_SUNLIGHT, UART_BAUD_SUNLIGHT, UART_RX_SUNLIGHT,
-                      UART_TX_SUNLIGHT)) {
+  if (!agsCO2_->begin(UART_PORT_SUNLIGHT, UART_BAUD_SUNLIGHT, UART_RX_SUNLIGHT, UART_TX_SUNLIGHT)) {
     ESP_LOGE(TAG, "Failed open serial for Sunlight");
     _co2Available = false;
   } else {
@@ -51,104 +49,27 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
 
     // Check if measurement samples have been configured before (using RTC
     // memory)
-    ESP_LOGI(TAG, "RTC samples configuration status: %d",
-             rtc_samples_configured);
+    ESP_LOGI(TAG, "RTC samples configuration status: %d", rtc_samples_configured);
 
     // Set measurement samples only if not configured before
     if (rtc_samples_configured == 0) {
-      // ===== MEASUREMENT SAMPLES CONFIGURATION (COMMENTED FOR FUTURE USE) =====
-      // ESP_LOGI(TAG, "First time setup - configuring measurement samples...");
-      // bool samplesChanged = false;
-      // do {
-      //   samplesChanged = co2_->set_measurement_samples(
-      //       CO2_MEASUREMENT_SAMPLES); // Use defined value for samples
-      // } while (!samplesChanged);
-      // ========================================================================
-
-      // Set measurement mode to single mode after samples configuration
-      ESP_LOGI(TAG, "Setting measurement mode to single mode...");
-
-      bool modeChanged = co2_->set_measurement_mode(0x0001); // SINGLE mode
-
-      if (/**samplesChanged && **/ modeChanged) {
-        // Restart CO2 sensor to apply measurement mode setting
-        ESP_LOGI(TAG, "Restarting CO2 sensor to apply measurement mode setting...");
-
-        // Disable GPIO hold before reset
-        gpio_hold_dis(EN_CO2);
-
-        gpio_set_level(EN_CO2, 0);       // Turn off CO2 sensor
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds
-        gpio_set_level(EN_CO2, 1);       // Turn on CO2 sensor
-        vTaskDelay(
-            pdMS_TO_TICKS(3000)); // Wait 3 seconds for sensor to stabilize
-
-        // Enable GPIO hold after reset
-        gpio_hold_en(EN_CO2);
-
-        // Re-initialize sensor after restart
-        if (!co2_->read_sensor_id()) {
-          ESP_LOGW(TAG, "Failed to read CO2 sensor ID after restart");
-        }
-
-        // Wait for valid CO2 reading (non-zero value)
-        ESP_LOGI(TAG, "Waiting for valid CO2 reading after restart...");
-        int16_t co2_reading = 0;
-        int retry_count = 0;
-        const int max_retries = 30; // Maximum 30 attempts (about 30 seconds)
-
-        do {
-          vTaskDelay(pdMS_TO_TICKS(2400));
-          
-          // Check if sensor is in single mode before triggering
-          if (co2_->is_single_mode()) {
-            int triggerResult = co2_->trigger_single_measurement();
-            if (triggerResult == 0) {
-              // Wait for measurement to complete
-              vTaskDelay(pdMS_TO_TICKS(3000)); // Wait 3 seconds
-              ESP_LOGD(TAG, "Single measurement triggered for init reading...");
-            } else {
-              ESP_LOGW(TAG, "Failed to trigger single measurement in init, trying to read anyway...");
-            }
-          } else {
-            ESP_LOGD(TAG, "Sensor in continuous mode, reading directly...");
-          }
-          
-          co2_reading = co2_->read_sensor_measurements();
-          retry_count++;
-          ESP_LOGI(TAG, "CO2 reading attempt %d: %d ppm", retry_count,
-                   co2_reading);
-
-          if (co2_reading > 0) {
-            ESP_LOGI(TAG, "Valid CO2 reading obtained: %d ppm", co2_reading);
-            break;
-          }
-
-          if (retry_count >= max_retries) {
-            ESP_LOGW(TAG, "Maximum retry attempts reached, proceeding with "
-                          "current reading");
-            break;
-          }
-
-          vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before next attempt
-        } while (co2_reading <= 0);
-
-        // Mark configuration as completed in RTC memory
-        rtc_samples_configured = 1;
+      rtc_samples_configured = _applySunlightMeasurementSample();
+      if (rtc_samples_configured) {
         ESP_LOGI(TAG, "Configuration status saved to RTC memory");
-      } else {
-        ESP_LOGI(TAG, "Measurement mode unchanged or failed - no "
-                      "restart needed");
       }
     } else {
-      ESP_LOGI(TAG,
-               "Configuration already completed, skipping setup...");
+      ESP_LOGI(TAG, "Configuration already completed, skipping setup...");
     }
 
     co2_->read_sensor_config(); // Check measurement samples setting and mode
-    
-    co2_->setABC(true);
-    co2_->setABCPeriod(co2ABCDays * 24); // Convert to hours
+
+    // Apply Automatic Background Calibration when value is valid
+    if (co2ABCDays > 0) {
+      co2_->setABC(true);
+      co2_->setABCPeriod(co2ABCDays * 24); // Convert to hours
+    } else {
+      co2_->setABC(false);
+    }
     ESP_LOGI(TAG, "CO2 ABC status: %d", co2_->isABCEnabled() ? 1 : 0);
     // NOTE: Since UART, need to check if its actually able to communicate?
   }
@@ -243,20 +164,19 @@ bool Sensor::init(Configuration::Model model, int co2ABCDays) {
   ESP_LOGI(TAG, "Initialize finish");
 
   if (model == Configuration::O_M_1PPSTON_CE) {
-    return (_co2Available && _pms1Available && _pms2Available &&
-            _chargerAvailable && _tvocNoxAvailable && _tempHumAvailable &&
-            _alphaSenseGasAvailable && _alphaSenseTempAvailable);
+    return (_co2Available && _pms1Available && _pms2Available && _chargerAvailable &&
+            _tvocNoxAvailable && _tempHumAvailable && _alphaSenseGasAvailable &&
+            _alphaSenseTempAvailable);
 
   } else {
-    return (_co2Available && _pms1Available && _pms2Available &&
-            _chargerAvailable && _tvocNoxAvailable && _tempHumAvailable);
+    return (_co2Available && _pms1Available && _pms2Available && _chargerAvailable &&
+            _tvocNoxAvailable && _tempHumAvailable);
   }
 }
 
 bool Sensor::startMeasures(int iterations, int intervalMs) {
-  ESP_LOGI(TAG,
-           "Start measures with %d iterations and interval in between %dms",
-           iterations, intervalMs);
+  ESP_LOGI(TAG, "Start measures with %d iterations and interval in between %dms", iterations,
+           intervalMs);
 
   // When starting, set all measures average values to invalid
   //  as indication no valid data from every iterations before saving to cache
@@ -266,7 +186,13 @@ bool Sensor::startMeasures(int iterations, int intervalMs) {
   _averageMeasure.pm01 = DEFAULT_INVALID_PM;
   _averageMeasure.pm25 = DEFAULT_INVALID_PM;
   _averageMeasure.pm10 = DEFAULT_INVALID_PM;
+  _averageMeasure.pm25Sp = DEFAULT_INVALID_PM;
   _averageMeasure.particleCount003 = DEFAULT_INVALID_PM;
+  _averageMeasure.particleCount005 = DEFAULT_INVALID_PM;
+  _averageMeasure.particleCount01 = DEFAULT_INVALID_PM;
+  _averageMeasure.particleCount02 = DEFAULT_INVALID_PM;
+  _averageMeasure.particleCount50 = DEFAULT_INVALID_PM;
+  _averageMeasure.particleCount10 = DEFAULT_INVALID_PM;
   _averageMeasure.tvocRaw = DEFAULT_INVALID_TVOC;
   _averageMeasure.noxRaw = DEFAULT_INVALID_NOX;
   _averageMeasure.vBat = DEFAULT_INVALID_VOLT;
@@ -318,10 +244,16 @@ void Sensor::printMeasures() {
   ESP_LOGI(TAG, "CO2 : %d", _averageMeasure.rco2);
   ESP_LOGI(TAG, "Temperature : %.1f", _averageMeasure.atmp);
   ESP_LOGI(TAG, "Humidity : %.1f", _averageMeasure.rhum);
-  ESP_LOGI(TAG, "PM1.0 : %.1f", _averageMeasure.pm01);
-  ESP_LOGI(TAG, "PM2.5 : %.1f", _averageMeasure.pm25);
-  ESP_LOGI(TAG, "PM10.0 : %.1f", _averageMeasure.pm10);
+  ESP_LOGI(TAG, "PM1.0#AE : %.1f", _averageMeasure.pm01);
+  ESP_LOGI(TAG, "PM2.5#AE : %.1f", _averageMeasure.pm25);
+  ESP_LOGI(TAG, "PM10.0#AE : %.1f", _averageMeasure.pm10);
+  ESP_LOGI(TAG, "PM2.5#SP : %.1f", _averageMeasure.pm25);
   ESP_LOGI(TAG, "PM 0.3 count : %d", _averageMeasure.particleCount003);
+  ESP_LOGI(TAG, "PM 0.5 count : %d", _averageMeasure.particleCount005);
+  ESP_LOGI(TAG, "PM 1.0 count : %d", _averageMeasure.particleCount01);
+  ESP_LOGI(TAG, "PM 2.5 count : %d", _averageMeasure.particleCount02);
+  ESP_LOGI(TAG, "PM 5.0 count : %d", _averageMeasure.particleCount50);
+  ESP_LOGI(TAG, "PM 10.0 count : %d", _averageMeasure.particleCount10);
   ESP_LOGI(TAG, "TVOC Raw : %d", _averageMeasure.tvocRaw);
   ESP_LOGI(TAG, "NOx Raw : %d", _averageMeasure.noxRaw);
   ESP_LOGI(TAG, "VBAT : %.2f", _averageMeasure.vBat);
@@ -350,19 +282,16 @@ bool Sensor::co2AttemptManualCalibration() {
     id_retry_count++;
 
     if (id_read_success) {
-      ESP_LOGI(TAG, "Sensor ID read successfully on attempt %d",
-               id_retry_count);
+      ESP_LOGI(TAG, "Sensor ID read successfully on attempt %d", id_retry_count);
       break;
     } else {
-      ESP_LOGW(TAG, "Sensor ID read failed on attempt %d, retrying...",
-               id_retry_count);
+      ESP_LOGW(TAG, "Sensor ID read failed on attempt %d, retrying...", id_retry_count);
       vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second between attempts
     }
   }
 
   if (!id_read_success) {
-    ESP_LOGE(TAG,
-             "Failed to read sensor ID after %d attempts, aborting calibration",
+    ESP_LOGE(TAG, "Failed to read sensor ID after %d attempts, aborting calibration",
              max_id_retries);
     return false;
   }
@@ -387,7 +316,13 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   data.pm01 = DEFAULT_INVALID_PM;
   data.pm25 = DEFAULT_INVALID_PM;
   data.pm10 = DEFAULT_INVALID_PM;
+  data.pm25Sp = DEFAULT_INVALID_PM;
   data.particleCount003 = DEFAULT_INVALID_PM;
+  data.particleCount005 = DEFAULT_INVALID_PM;
+  data.particleCount01 = DEFAULT_INVALID_PM;
+  data.particleCount02 = DEFAULT_INVALID_PM;
+  data.particleCount50 = DEFAULT_INVALID_PM;
+  data.particleCount10 = DEFAULT_INVALID_PM;
   data.tvocRaw = DEFAULT_INVALID_TVOC;
   data.noxRaw = DEFAULT_INVALID_NOX;
   data.vBat = DEFAULT_INVALID_VOLT;
@@ -412,15 +347,14 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
     } else {
       ESP_LOGD(TAG, "Sensor in continuous mode, reading CO2 value directly...");
     }
-    
+
     data.rco2 = co2_->read_sensor_measurements();
     ESP_LOGD(TAG, "CO2: %d", data.rco2);
   }
 
   if (_tempHumAvailable) {
     float temperature, humidity;
-    esp_err_t result =
-        sht4x_get_measurement(sht_dev_hdl, &temperature, &humidity);
+    esp_err_t result = sht4x_get_measurement(sht_dev_hdl, &temperature, &humidity);
     if (result != ESP_OK) {
       ESP_LOGE(TAG, "sht4x device read failed (%s)", esp_err_to_name(result));
     } else {
@@ -434,11 +368,10 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
   if (_tvocNoxAvailable) {
     uint16_t tvocRaw;
     uint16_t noxRaw;
-    esp_err_t result = sgp4x_measure_compensated_signals(
-        sgp_dev_hdl, data.atmp, data.rhum, &tvocRaw, &noxRaw);
+    esp_err_t result =
+        sgp4x_measure_compensated_signals(sgp_dev_hdl, data.atmp, data.rhum, &tvocRaw, &noxRaw);
     if (result != ESP_OK) {
-      ESP_LOGE(TAG, "sgp4x device conditioning failed (%s)",
-               esp_err_to_name(result));
+      ESP_LOGE(TAG, "sgp4x device conditioning failed (%s)", esp_err_to_name(result));
     } else {
       ESP_LOGD(TAG, "SRAW VOC: %u", tvocRaw);
       ESP_LOGD(TAG, "SRAW NOX: %u", noxRaw);
@@ -454,10 +387,7 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
       pms1_->clearBuffer();
       pms1_->requestRead();
       if (pms1_->readUntil(pmData1, 1000)) {
-        ESP_LOGD(TAG, "{1} PM1.0 : %d", pmData1.pm_ae_1_0);
-        ESP_LOGD(TAG, "{1} PM2.5 : %d", pmData1.pm_ae_2_5);
-        ESP_LOGD(TAG, "{1} PM10.0 : %d", pmData1.pm_ae_10_0);
-        ESP_LOGD(TAG, "{1} PM 0.3 count : %d", pmData1.pm_raw_0_3);
+        _printPMData(1, pmData1);
         pms1ReadSuccess = true;
       } else {
         ESP_LOGE(TAG, "{1} PMS no data");
@@ -470,10 +400,7 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
       pms2_->clearBuffer();
       pms2_->requestRead();
       if (pms2_->readUntil(pmData2, 1000)) {
-        ESP_LOGD(TAG, "{2} PM1.0 : %d", pmData2.pm_ae_1_0);
-        ESP_LOGD(TAG, "{2} PM2.5 : %d", pmData2.pm_ae_2_5);
-        ESP_LOGD(TAG, "{2} PM10.0 : %d", pmData2.pm_ae_10_0);
-        ESP_LOGD(TAG, "{2} PM 0.3 count : %d", pmData2.pm_raw_0_3);
+        _printPMData(2, pmData2);
         pms2ReadSuccess = true;
       } else {
         ESP_LOGE(TAG, "{2} PMS no data");
@@ -486,17 +413,35 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
       data.pm01 = (pmData1.pm_ae_1_0 + pmData2.pm_ae_1_0) / 2.0f;
       data.pm25 = (pmData1.pm_ae_2_5 + pmData2.pm_ae_2_5) / 2.0f;
       data.pm10 = (pmData1.pm_ae_10_0 + pmData2.pm_ae_10_0) / 2.0f;
+      data.pm25Sp = (pmData1.pm_sp_2_5 + pmData2.pm_sp_2_5) / 2.0f;
       data.particleCount003 = (pmData1.pm_raw_0_3 + pmData2.pm_raw_0_3) / 2.0f;
+      data.particleCount005 = (pmData1.pm_raw_0_5 + pmData2.pm_raw_0_5) / 2.0f;
+      data.particleCount01 = (pmData1.pm_raw_1_0 + pmData2.pm_raw_1_0) / 2.0f;
+      data.particleCount02 = (pmData1.pm_raw_2_5 + pmData2.pm_raw_2_5) / 2.0f;
+      data.particleCount50 = (pmData1.pm_raw_5_0 + pmData2.pm_raw_5_0) / 2.0f;
+      data.particleCount10 = (pmData1.pm_raw_10_0 + pmData2.pm_raw_10_0) / 2.0f;
     } else if (pms1ReadSuccess) {
       data.pm01 = pmData1.pm_ae_1_0;
       data.pm25 = pmData1.pm_ae_2_5;
       data.pm10 = pmData1.pm_ae_10_0;
+      data.pm25Sp = pmData1.pm_sp_2_5;
       data.particleCount003 = pmData1.pm_raw_0_3;
+      data.particleCount005 = pmData1.pm_raw_0_5;
+      data.particleCount01 = pmData1.pm_raw_1_0;
+      data.particleCount02 = pmData1.pm_raw_2_5;
+      data.particleCount50 = pmData1.pm_raw_5_0;
+      data.particleCount10 = pmData1.pm_raw_10_0;
     } else if (pms2ReadSuccess) {
       data.pm01 = pmData2.pm_ae_1_0;
       data.pm25 = pmData2.pm_ae_2_5;
       data.pm10 = pmData2.pm_ae_10_0;
+      data.pm25Sp = pmData2.pm_sp_2_5;
       data.particleCount003 = pmData2.pm_raw_0_3;
+      data.particleCount005 = pmData2.pm_raw_0_5;
+      data.particleCount01 = pmData2.pm_raw_1_0;
+      data.particleCount02 = pmData2.pm_raw_2_5;
+      data.particleCount50 = pmData2.pm_raw_5_0;
+      data.particleCount10 = pmData2.pm_raw_10_0;
     }
   }
 
@@ -592,14 +537,67 @@ void Sensor::_applyIteration(AirgradientClient::MaxSensorPayload &data) {
     _pm10IterationOkCount = _pm10IterationOkCount + 1;
   }
 
+  if (IS_PM_VALID(data.pm25Sp)) {
+    if (_averageMeasure.pm25Sp == DEFAULT_INVALID_PM) {
+      _averageMeasure.pm25Sp = data.pm25Sp;
+    } else {
+      _averageMeasure.pm25Sp = _averageMeasure.pm25Sp + data.pm25Sp;
+    }
+    _pm25SpIterationOkCount = _pm10IterationOkCount + 1;
+  }
+
   if (IS_PM_VALID(data.particleCount003)) {
     if (_averageMeasure.particleCount003 == DEFAULT_INVALID_PM) {
       _averageMeasure.particleCount003 = data.particleCount003;
     } else {
-      _averageMeasure.particleCount003 =
-          _averageMeasure.particleCount003 + data.particleCount003;
+      _averageMeasure.particleCount003 = _averageMeasure.particleCount003 + data.particleCount003;
     }
     _pm003CountIterationOkCount = _pm003CountIterationOkCount + 1;
+  }
+
+  if (IS_PM_VALID(data.particleCount005)) {
+    if (_averageMeasure.particleCount005 == DEFAULT_INVALID_PM) {
+      _averageMeasure.particleCount005 = data.particleCount005;
+    } else {
+      _averageMeasure.particleCount005 = _averageMeasure.particleCount005 + data.particleCount005;
+    }
+    _pm005CountIterationOkCount = _pm005CountIterationOkCount + 1;
+  }
+
+  if (IS_PM_VALID(data.particleCount01)) {
+    if (_averageMeasure.particleCount01 == DEFAULT_INVALID_PM) {
+      _averageMeasure.particleCount01 = data.particleCount01;
+    } else {
+      _averageMeasure.particleCount01 = _averageMeasure.particleCount01 + data.particleCount01;
+    }
+    _pm01CountIterationOkCount = _pm01CountIterationOkCount + 1;
+  }
+
+  if (IS_PM_VALID(data.particleCount02)) {
+    if (_averageMeasure.particleCount02 == DEFAULT_INVALID_PM) {
+      _averageMeasure.particleCount02 = data.particleCount02;
+    } else {
+      _averageMeasure.particleCount02 = _averageMeasure.particleCount02 + data.particleCount02;
+    }
+    _pm02CountIterationOkCount = _pm02CountIterationOkCount + 1;
+  }
+
+  if (IS_PM_VALID(data.particleCount50)) {
+    if (_averageMeasure.particleCount50 == DEFAULT_INVALID_PM) {
+      _averageMeasure.particleCount50 = data.particleCount50;
+    } else {
+      _averageMeasure.particleCount50 = _averageMeasure.particleCount50 + data.particleCount50;
+    }
+    _pm50CountIterationOkCount = _pm50CountIterationOkCount + 1;
+  }
+
+  if (IS_PM_VALID(data.particleCount10)) {
+    if (_averageMeasure.particleCount10 == DEFAULT_INVALID_PM) {
+      _averageMeasure.particleCount10 = data.particleCount10;
+    } else {
+      _averageMeasure.particleCount10 = _averageMeasure.particleCount10 + data.particleCount10;
+    }
+    _pm10CountIterationOkCount = _pm10CountIterationOkCount + 1;
   }
 
   if (IS_TVOC_VALID(data.tvocRaw)) {
@@ -695,8 +693,7 @@ void Sensor::_warmUpSensor() {
     sgp4x_self_test_result_t selfTestResult;
     esp_err_t result = sgp4x_execute_self_test(sgp_dev_hdl, &selfTestResult);
     if (result != ESP_OK) {
-      ESP_LOGE(TAG, "sgp4x device self-test failed (%s)",
-               esp_err_to_name(result));
+      ESP_LOGE(TAG, "sgp4x device self-test failed (%s)", esp_err_to_name(result));
     } else {
       ESP_LOGI(TAG, "VOC Pixel: %d", selfTestResult.pixels.voc_pixel_failed);
       ESP_LOGI(TAG, "NOX Pixel: %d", selfTestResult.pixels.nox_pixel_failed);
@@ -720,13 +717,104 @@ void Sensor::_warmUpSensor() {
       // atmp
       esp_err_t result = sgp4x_execute_conditioning(sgp_dev_hdl, &sraw_voc);
       if (result != ESP_OK) {
-        ESP_LOGE(TAG, "sgp4x device conditioning failed (%s)",
-                 esp_err_to_name(result));
+        ESP_LOGE(TAG, "sgp4x device conditioning failed (%s)", esp_err_to_name(result));
       } else {
         ESP_LOGI(TAG, "SRAW VOC: %u", sraw_voc);
       }
     }
   }
+}
+
+bool Sensor::_applySunlightMeasurementSample() {
+  // Set measurement mode to single mode after samples configuration
+  ESP_LOGI(TAG, "Setting measurement mode to single mode...");
+  bool modeChanged = co2_->set_measurement_mode(0x0001); // SINGLE mode
+  if (!modeChanged) {
+    ESP_LOGI(TAG, "Measurement mode unchanged or failed - no restart needed");
+    return false;
+  }
+
+  // Restart CO2 sensor to apply measurement mode setting
+  ESP_LOGI(TAG, "Restarting CO2 sensor to apply measurement mode setting...");
+
+  // Disable GPIO hold before reset
+  gpio_hold_dis(EN_CO2);
+
+  gpio_set_level(EN_CO2, 0);       // Turn off CO2 sensor
+  vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds
+  gpio_set_level(EN_CO2, 1);       // Turn on CO2 sensor
+  vTaskDelay(pdMS_TO_TICKS(3000)); // Wait 3 seconds for sensor to stabilize
+
+  // Enable GPIO hold after reset
+  gpio_hold_en(EN_CO2);
+
+  // Re-initialize sensor after restart
+  if (!co2_->read_sensor_id()) {
+    ESP_LOGW(TAG, "Failed to read CO2 sensor ID after restart");
+  }
+
+  // Wait for valid CO2 reading (non-zero value)
+  ESP_LOGI(TAG, "Waiting for valid CO2 reading after restart...");
+  int16_t co2_reading = 0;
+  int retry_count = 0;
+  const int max_retries = 30; // Maximum 30 attempts (about 30 seconds)
+
+  do {
+    vTaskDelay(pdMS_TO_TICKS(2400));
+
+    // Check if sensor is in single mode before triggering
+    if (co2_->is_single_mode()) {
+      int triggerResult = co2_->trigger_single_measurement();
+      if (triggerResult == 0) {
+        // Wait for measurement to complete
+        vTaskDelay(pdMS_TO_TICKS(3000)); // Wait 3 seconds
+        ESP_LOGD(TAG, "Single measurement triggered for init reading...");
+      } else {
+        ESP_LOGW(TAG, "Failed to trigger single measurement in init, trying to read anyway...");
+      }
+    } else {
+      ESP_LOGD(TAG, "Sensor in continuous mode, reading directly...");
+    }
+
+    co2_reading = co2_->read_sensor_measurements();
+    retry_count++;
+    ESP_LOGI(TAG, "CO2 reading attempt %d: %d ppm", retry_count, co2_reading);
+
+    if (co2_reading > 0) {
+      ESP_LOGI(TAG, "Valid CO2 reading obtained: %d ppm", co2_reading);
+      break;
+    }
+
+    if (retry_count >= max_retries) {
+      ESP_LOGW(TAG, "Maximum retry attempts reached, proceeding with "
+                    "current reading");
+      break;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before next attempt
+  } while (co2_reading <= 0);
+
+  return true;
+}
+
+void Sensor::_printPMData(int ch, PMS::Data &data) {
+  // Atmospheric environment
+  ESP_LOGD(TAG, "{%d} PM1.0#AE: %d", ch, data.pm_ae_1_0);
+  ESP_LOGD(TAG, "{%d} PM2.5#AE: %d", ch, data.pm_ae_2_5);
+  ESP_LOGD(TAG, "{%d} PM10.0#AE: %d", ch, data.pm_ae_10_0);
+
+  // Standard Particles, CF=1
+  // ESP_LOGD(TAG, "{%d} PM1.0 - SP: %d", ch, data.pm_sp_1_0);
+  ESP_LOGD(TAG, "{%d} PM2.5#SP: %d", ch, data.pm_sp_2_5);
+  // ESP_LOGD(TAG, "{%d} PM10.0 - SP: %d", ch, data.pm_sp_10_0);
+
+  // Particle Count
+  ESP_LOGD(TAG, "{%d} PM 0.3 count : %d", ch, data.pm_raw_0_3);
+  ESP_LOGD(TAG, "{%d} PM 0.5 count : %d", ch, data.pm_raw_0_5);
+  ESP_LOGD(TAG, "{%d} PM 1.0 count : %d", ch, data.pm_raw_1_0);
+  ESP_LOGD(TAG, "{%d} PM 2.5 count : %d", ch, data.pm_raw_2_5);
+  ESP_LOGD(TAG, "{%d} PM 5.0 count : %d", ch, data.pm_raw_5_0);
+  ESP_LOGD(TAG, "{%d} PM 10 count : %d", ch, data.pm_raw_10_0);
 }
 
 void Sensor::_calculateMeasuresAverage() {
@@ -754,9 +842,34 @@ void Sensor::_calculateMeasuresAverage() {
     _averageMeasure.pm10 = _averageMeasure.pm10 / _pm10IterationOkCount;
   }
 
+  if (_pm25SpIterationOkCount > 0) {
+    _averageMeasure.pm25Sp = _averageMeasure.pm25Sp / _pm25SpIterationOkCount;
+  }
+
   if (_pm003CountIterationOkCount > 0) {
     _averageMeasure.particleCount003 =
         _averageMeasure.particleCount003 / _pm003CountIterationOkCount;
+  }
+
+  if (_pm005CountIterationOkCount > 0) {
+    _averageMeasure.particleCount005 =
+        _averageMeasure.particleCount005 / _pm005CountIterationOkCount;
+  }
+
+  if (_pm01CountIterationOkCount > 0) {
+    _averageMeasure.particleCount01 = _averageMeasure.particleCount01 / _pm01CountIterationOkCount;
+  }
+
+  if (_pm02CountIterationOkCount > 0) {
+    _averageMeasure.particleCount02 = _averageMeasure.particleCount02 / _pm02CountIterationOkCount;
+  }
+
+  if (_pm50CountIterationOkCount > 0) {
+    _averageMeasure.particleCount50 = _averageMeasure.particleCount50 / _pm50CountIterationOkCount;
+  }
+
+  if (_pm10CountIterationOkCount > 0) {
+    _averageMeasure.particleCount10 = _averageMeasure.particleCount10 / _pm10CountIterationOkCount;
   }
 
   if (_tvocIterationOkCount > 0) {
@@ -776,8 +889,7 @@ void Sensor::_calculateMeasuresAverage() {
   }
 
   if (_o3WEIterationOkCount > 0) {
-    _averageMeasure.o3WorkingElectrode =
-        _averageMeasure.o3WorkingElectrode / _o3WEIterationOkCount;
+    _averageMeasure.o3WorkingElectrode = _averageMeasure.o3WorkingElectrode / _o3WEIterationOkCount;
   }
 
   if (_o3AEIterationOkCount > 0) {
@@ -796,7 +908,14 @@ void Sensor::_calculateMeasuresAverage() {
   }
 
   if (_afeTempIterationOkCount > 0) {
-    _averageMeasure.afeTemp =
-        _averageMeasure.afeTemp / _afeTempIterationOkCount;
+    _averageMeasure.afeTemp = _averageMeasure.afeTemp / _afeTempIterationOkCount;
   }
+}
+
+float Sensor::batteryVoltage() {
+  if (!_chargerAvailable) {
+    return -1.0;
+  }
+
+  return _averageMeasure.vBat;
 }
