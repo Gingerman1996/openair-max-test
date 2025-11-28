@@ -61,6 +61,8 @@ RTC_DATA_ATTR int xMeasurementLeadTimeSeconds = 0;
 // Hold the index of measures queue on which http post should start send measures
 // eg. xHttpCacheQueueIndex = 3, then for [q1, q2, q3, q4, q5, q6] should only send q4, q5, q6
 RTC_DATA_ATTR unsigned long xHttpCacheQueueIndex = 0;
+// Track whether GNSS cold start has been issued
+RTC_DATA_ATTR bool xGnssColdStartIssued = false;
 
 // Hold the previous wake up cycle measure interval
 // Help to check if there's a measure interval change that make previous payload cache invalid
@@ -104,18 +106,19 @@ static void resetExtWatchdog() {
 static void watchdogResetTask(void *pvParameters) {
   const TickType_t watchdog_interval = pdMS_TO_TICKS(5 * 60 * 1000); // 5 minutes
   int reset_count = 0;
-  
+
   ESP_LOGI(TAG, "Watchdog reset task started - will reset every 5 minutes");
-  
+
   while (watchdogTaskActive) {
     vTaskDelay(watchdog_interval);
     if (watchdogTaskActive) {
       resetExtWatchdog();
       reset_count++;
-      ESP_LOGI(TAG, "Background watchdog reset #%d (%.1f minutes)", reset_count, reset_count * 5.0f);
+      ESP_LOGI(TAG, "Background watchdog reset #%d (%.1f minutes)", reset_count,
+               reset_count * 5.0f);
     }
   }
-  
+
   ESP_LOGI(TAG, "Watchdog reset task stopping (performed %d resets)", reset_count);
   vTaskDelete(NULL);
 }
@@ -261,9 +264,9 @@ extern "C" void app_main(void) {
     // Initialize boot button event handler only on the first boot
     // So on next boot onwards, boot button will not function
     initBootButton();
-    
+
     // Register console commands for GNSS testing on first boot only
-    register_gnss_commands();
+    // register_gnss_commands();
   }
 
   // Initialize NVS
@@ -369,7 +372,8 @@ static void runGnssOnlyMode(int wakeUpCounter) {
   ESP_LOGI(TAG, "Entering GNSS-only mode loop");
 
   if (g_configuration.getNetworkOption() != NetworkOption::Cellular) {
-    ESP_LOGW(TAG, "Device configured for non-cellular operation, continuing with cellular GNSS mode");
+    ESP_LOGW(TAG,
+             "Device configured for non-cellular operation, continuing with cellular GNSS mode");
   }
 
   if (!initializeCellularForGnss(wakeUpCounter)) {
@@ -389,6 +393,8 @@ static void runGnssOnlyMode(int wakeUpCounter) {
     }
   }
 
+  bool hasColdStartHistory = xGnssColdStartIssued;
+
   while (true) {
     auto status = a7672xx->gnssInit();
     if (status == CellReturnStatus::Ok) {
@@ -398,25 +404,59 @@ static void runGnssOnlyMode(int wakeUpCounter) {
     ESP_LOGE(TAG, "GNSS initialization failed (status=%d), retrying...", static_cast<int>(status));
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
-
-  // Follow required sequence: power on, set mode/NMEA (in gnssInit), cold start, then continue
-  auto coldStatus = a7672xx->gnssColdStart();
-  if (coldStatus == CellReturnStatus::Ok) {
-    ESP_LOGI(TAG, "GNSS cold start issued");
-  } else {
-    ESP_LOGW(TAG, "GNSS cold start failed (status=%d)", static_cast<int>(coldStatus));
+  // Always attempt cold start first (once) then hot start to speed up subsequent fixes
+  if (!xGnssColdStartIssued) {
+    auto coldStatus = a7672xx->gnssColdStart();
+    if (coldStatus == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS cold start issued");
+      xGnssColdStartIssued = true;
+    } else {
+      ESP_LOGW(TAG, "GNSS cold start failed (status=%d)", static_cast<int>(coldStatus));
+    }
   }
+  else {
+    auto hotStatus = a7672xx->gnssHotStart();
+    if (hotStatus == CellReturnStatus::Ok) {
+      ESP_LOGI(TAG, "GNSS hot start issued");
+    } else {
+      ESP_LOGW(TAG, "GNSS hot start failed (status=%d)", static_cast<int>(hotStatus));
+    }
+  }
+
+  uint32_t fixTimerStartMs = MILLIS();
 
   ESP_LOGI(TAG, "GNSS module ready; continuously reading GNSS data (no deep sleep)");
 
-  // Reset external watchdog every 5 minutes while sampling GNSS once per second
+  auto isGnssPayloadComplete = [](const std::string &payload) -> bool {
+    return payload.find(",,") == std::string::npos;
+  };
+
+  // Reset external watchdog every 5 minutes while sampling GNSS
   constexpr int kWatchdogResetIntervalSec = 5 * 60;
   int secondsSinceWatchdogReset = 0;
 
   while (true) {
     auto info = a7672xx->gnssGetInfo();
     if (info.status == CellReturnStatus::Ok) {
-      ESP_LOGI(TAG, "GNSS Fix: %s", info.data.c_str());
+      if (!isGnssPayloadComplete(info.data)) {
+        ESP_LOGW(TAG, "GNSS response incomplete (contains empty fields): %s", info.data.c_str());
+      } else {
+        uint32_t elapsedMs = MILLIS() - fixTimerStartMs;
+        float elapsedMin = static_cast<float>(elapsedMs) / 60000.0f;
+        ESP_LOGI(TAG, "GNSS Fix: %s", info.data.c_str());
+        ESP_LOGI(TAG, "Time to first complete fix: %lu ms (%.2f minutes)",
+                 static_cast<unsigned long>(elapsedMs), elapsedMin);
+        ESP_LOGI(TAG, "GNSS fix acquired; holding CE load switch high and sleeping for 60s");
+        a7672xx->gnssPowerOff();
+        a7672xx->powerOff(false);
+        gpio_set_level(EN_CE_CARD, 1);
+        gpio_hold_en(EN_CE_CARD);
+        resetExtWatchdog();
+        esp_sleep_enable_timer_wakeup(60ULL * 1000000ULL);
+        g_statusLed.off();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_deep_sleep_start();
+      }
     } else if (info.status == CellReturnStatus::Failed) {
       ESP_LOGW(TAG, "GNSS fix not yet available (last response: %s)",
                info.data.empty() ? "<empty>" : info.data.c_str());
@@ -424,8 +464,7 @@ static void runGnssOnlyMode(int wakeUpCounter) {
       ESP_LOGW(TAG, "Timed out waiting for GNSS info");
     } else {
       ESP_LOGE(TAG, "Error reading GNSS info (status=%d, last response: %s)",
-               static_cast<int>(info.status),
-               info.data.empty() ? "<empty>" : info.data.c_str());
+               static_cast<int>(info.status), info.data.empty() ? "<empty>" : info.data.c_str());
     }
 
     secondsSinceWatchdogReset++;
@@ -433,7 +472,6 @@ static void runGnssOnlyMode(int wakeUpCounter) {
       resetExtWatchdog();
       secondsSinceWatchdogReset = 0;
     }
-    // Sample GNSS once per second
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
@@ -478,17 +516,12 @@ void startWatchdogTask() {
     ESP_LOGW(TAG, "Watchdog task already running");
     return;
   }
-  
+
   watchdogTaskActive = true;
-  BaseType_t result = xTaskCreate(
-    watchdogResetTask,
-    "watchdog_reset",
-    2048,
-    NULL,
-    5,  // Priority
-    &watchdogTaskHandle
-  );
-  
+  BaseType_t result = xTaskCreate(watchdogResetTask, "watchdog_reset", 2048, NULL,
+                                  5, // Priority
+                                  &watchdogTaskHandle);
+
   if (result == pdPASS) {
     ESP_LOGI(TAG, "Watchdog reset task created successfully");
   } else {
@@ -502,21 +535,22 @@ void stopWatchdogTask() {
     ESP_LOGW(TAG, "Watchdog task not running");
     return;
   }
-  
+
   ESP_LOGI(TAG, "Stopping watchdog reset task...");
   watchdogTaskActive = false;
-  
+
   // Wait for task to finish
   vTaskDelay(pdMS_TO_TICKS(100));
-  
+
   // Reset handle
   watchdogTaskHandle = NULL;
-  
+
   ESP_LOGI(TAG, "Watchdog reset task stopped");
 }
 
 void initGPIO() {
   // Initialize IOs configurations
+  ESP_LOGI(TAG, "Initializing GPIOs...");
   gpio_config_t io_conf;
   io_conf.mode = GPIO_MODE_OUTPUT;
   io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
@@ -1192,7 +1226,7 @@ static int gnss_init_cmd(int argc, char **argv) {
   }
 
   // Cast to A7672XX to access GNSS functions
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Initializing GNSS...\n");
   auto result = a7672xx->gnssInit();
@@ -1211,7 +1245,7 @@ static int gnss_start_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Starting GNSS positioning...\n");
   auto result = a7672xx->gnssStart();
@@ -1231,7 +1265,7 @@ static int gnss_stop_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Stopping GNSS...\n");
   auto result = a7672xx->gnssStop();
@@ -1250,13 +1284,15 @@ static int gnss_location_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Reading GNSS location...\n");
   auto result = a7672xx->gnssGetLocation();
   if (result.status == CellReturnStatus::Ok) {
     printf("Location: %s\n", result.data.c_str());
-    printf("Format: [mode],[GPS-SVs],[GLONASS-SVs],[BEIDOU-SVs],[lat],[N/S],[lon],[E/W],[date],[UTC-time],[alt],[speed],[course],[PDOP],[HDOP],[VDOP]\n");
+    printf("Format: "
+           "[mode],[GPS-SVs],[GLONASS-SVs],[BEIDOU-SVs],[lat],[N/S],[lon],[E/"
+           "W],[date],[UTC-time],[alt],[speed],[course],[PDOP],[HDOP],[VDOP]\n");
     return 0;
   } else if (result.status == CellReturnStatus::Failed) {
     printf("No GNSS fix available. Please wait for satellites to be acquired.\n");
@@ -1273,7 +1309,7 @@ static int gnss_test_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   struct {
     struct arg_lit *enable;
@@ -1286,7 +1322,7 @@ static int gnss_test_cmd(int argc, char **argv) {
   args.end = arg_end(2);
 
   void *argtable[] = {args.enable, args.disable, args.end};
-  
+
   if (arg_parse(argc, argv, argtable) != 0) {
     arg_print_errors(stderr, args.end, "gnss_test");
     arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
@@ -1326,14 +1362,14 @@ static int gnss_monitor_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Starting GNSS 1-hour monitoring...\n");
   printf("Background watchdog reset task should already be running.\n");
-  
+
   // Start the 1-hour GNSS monitoring
   auto result = a7672xx->gnssReadOneHour();
-  
+
   if (result == CellReturnStatus::Ok) {
     printf("GNSS 1-hour monitoring completed successfully\n");
     return 0;
@@ -1349,7 +1385,7 @@ static int gnss_hotstart_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Performing GNSS hot start...\n");
   auto result = a7672xx->gnssHotStart();
@@ -1369,7 +1405,7 @@ static int gnss_coldstart_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Performing GNSS cold start...\n");
   auto result = a7672xx->gnssColdStart();
@@ -1389,7 +1425,7 @@ static int gnss_agps_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Enabling AGPS assistance...\n");
   auto result = a7672xx->gnssEnableAGPS();
@@ -1412,7 +1448,7 @@ static int gnss_info_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Getting GNSS info via AT+CGNSSINFO...\n");
   auto result = a7672xx->gnssGetInfo();
@@ -1435,7 +1471,7 @@ static int gnss_gpsinfo_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Getting GPS info via AT+CGPSINFO...\n");
   auto result = a7672xx->gnssGetGPSInfo();
@@ -1458,7 +1494,7 @@ static int gnss_antenna_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Getting GNSS antenna info via AT+CGNSSANT...\n");
   auto result = a7672xx->gnssGetAntennaInfo();
@@ -1482,7 +1518,7 @@ static int gnss_satellite_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Getting satellite info via AT+CGNSSSAT...\n");
   auto result = a7672xx->gnssGetSatelliteInfo();
@@ -1505,7 +1541,7 @@ static int gnss_signal_cmd(int argc, char **argv) {
     return 1;
   }
 
-  CellularModuleA7672XX* a7672xx = static_cast<CellularModuleA7672XX*>(g_cellularCard);
+  CellularModuleA7672XX *a7672xx = static_cast<CellularModuleA7672XX *>(g_cellularCard);
 
   printf("Getting GNSS signal strength via AT+CGNSSISR...\n");
   auto result = a7672xx->gnssGetSignalStrength();
@@ -1524,114 +1560,114 @@ static int gnss_signal_cmd(int argc, char **argv) {
 
 static void register_gnss_commands() {
   const esp_console_cmd_t gnss_init = {
-    .command = "gnss_init",
-    .help = "Initialize GNSS module",
-    .hint = NULL,
-    .func = &gnss_init_cmd,
+      .command = "gnss_init",
+      .help = "Initialize GNSS module",
+      .hint = NULL,
+      .func = &gnss_init_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_init));
 
   const esp_console_cmd_t gnss_start = {
-    .command = "gnss_start",
-    .help = "Start GNSS positioning",
-    .hint = NULL,
-    .func = &gnss_start_cmd,
+      .command = "gnss_start",
+      .help = "Start GNSS positioning",
+      .hint = NULL,
+      .func = &gnss_start_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_start));
 
   const esp_console_cmd_t gnss_stop = {
-    .command = "gnss_stop",
-    .help = "Stop GNSS positioning",
-    .hint = NULL,
-    .func = &gnss_stop_cmd,
+      .command = "gnss_stop",
+      .help = "Stop GNSS positioning",
+      .hint = NULL,
+      .func = &gnss_stop_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_stop));
 
   const esp_console_cmd_t gnss_location = {
-    .command = "gnss_location",
-    .help = "Get current GNSS location",
-    .hint = NULL,
-    .func = &gnss_location_cmd,
+      .command = "gnss_location",
+      .help = "Get current GNSS location",
+      .hint = NULL,
+      .func = &gnss_location_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_location));
 
   const esp_console_cmd_t gnss_test = {
-    .command = "gnss_test",
-    .help = "Enable/disable GNSS test mode",
-    .hint = "[-e|--enable] [-d|--disable]",
-    .func = &gnss_test_cmd,
+      .command = "gnss_test",
+      .help = "Enable/disable GNSS test mode",
+      .hint = "[-e|--enable] [-d|--disable]",
+      .func = &gnss_test_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_test));
 
   const esp_console_cmd_t gnss_hotstart = {
-    .command = "gnss_hotstart",
-    .help = "Perform GNSS hot start",
-    .hint = NULL,
-    .func = &gnss_hotstart_cmd,
+      .command = "gnss_hotstart",
+      .help = "Perform GNSS hot start",
+      .hint = NULL,
+      .func = &gnss_hotstart_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_hotstart));
 
   const esp_console_cmd_t gnss_coldstart = {
-    .command = "gnss_coldstart",
-    .help = "Perform GNSS cold start",
-    .hint = NULL,
-    .func = &gnss_coldstart_cmd,
+      .command = "gnss_coldstart",
+      .help = "Perform GNSS cold start",
+      .hint = NULL,
+      .func = &gnss_coldstart_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_coldstart));
 
   const esp_console_cmd_t gnss_agps = {
-    .command = "gnss_agps",
-    .help = "Enable AGPS assistance",
-    .hint = NULL,
-    .func = &gnss_agps_cmd,
+      .command = "gnss_agps",
+      .help = "Enable AGPS assistance",
+      .hint = NULL,
+      .func = &gnss_agps_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_agps));
 
   const esp_console_cmd_t gnss_info = {
-    .command = "gnss_info",
-    .help = "Get GNSS info via AT+CGNSSINFO",
-    .hint = NULL,
-    .func = &gnss_info_cmd,
+      .command = "gnss_info",
+      .help = "Get GNSS info via AT+CGNSSINFO",
+      .hint = NULL,
+      .func = &gnss_info_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_info));
 
   const esp_console_cmd_t gnss_gpsinfo = {
-    .command = "gnss_gpsinfo",
-    .help = "Get GPS info via AT+CGPSINFO",
-    .hint = NULL,
-    .func = &gnss_gpsinfo_cmd,
+      .command = "gnss_gpsinfo",
+      .help = "Get GPS info via AT+CGPSINFO",
+      .hint = NULL,
+      .func = &gnss_gpsinfo_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_gpsinfo));
 
   const esp_console_cmd_t gnss_antenna = {
-    .command = "gnss_antenna",
-    .help = "Check GNSS antenna status via AT+CGNSSANT",
-    .hint = NULL,
-    .func = &gnss_antenna_cmd,
+      .command = "gnss_antenna",
+      .help = "Check GNSS antenna status via AT+CGNSSANT",
+      .hint = NULL,
+      .func = &gnss_antenna_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_antenna));
 
   const esp_console_cmd_t gnss_satellite = {
-    .command = "gnss_satellite",
-    .help = "Get satellite info via AT+CGNSSSAT",
-    .hint = NULL,
-    .func = &gnss_satellite_cmd,
+      .command = "gnss_satellite",
+      .help = "Get satellite info via AT+CGNSSSAT",
+      .hint = NULL,
+      .func = &gnss_satellite_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_satellite));
 
   const esp_console_cmd_t gnss_signal = {
-    .command = "gnss_signal",
-    .help = "Get GNSS signal strength via AT+CGNSSISR",
-    .hint = NULL,
-    .func = &gnss_signal_cmd,
+      .command = "gnss_signal",
+      .help = "Get GNSS signal strength via AT+CGNSSISR",
+      .hint = NULL,
+      .func = &gnss_signal_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_signal));
 
   const esp_console_cmd_t gnss_monitor = {
-    .command = "gnss_monitor",
-    .help = "Monitor GNSS for 1 hour with watchdog reset every 5 minutes",
-    .hint = NULL,
-    .func = &gnss_monitor_cmd,
+      .command = "gnss_monitor",
+      .help = "Monitor GNSS for 1 hour with watchdog reset every 5 minutes",
+      .hint = NULL,
+      .func = &gnss_monitor_cmd,
   };
   ESP_ERROR_CHECK(esp_console_cmd_register(&gnss_monitor));
 
