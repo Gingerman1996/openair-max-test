@@ -26,7 +26,9 @@ RTC_DATA_ATTR static uint8_t rtc_samples_configured = 0;
 // CO2 sensor measurement samples configuration
 #define CO2_MEASUREMENT_SAMPLES 1 // Number of samples (1-1024), lower = less power consumption
 
+#ifndef LOG_LOCAL_LEVEL
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+#endif
 #include "esp_log.h"
 
 Sensor::Sensor(i2c_master_bus_handle_t busHandle) : _busHandle(busHandle) {}
