@@ -32,6 +32,14 @@
 #define REG37_VBUS_ADC1 0x37 // Register Address for VBUS ADC1
 #define REG39_VBUS_ADC2 0x39 // Register Address for VBUS ADC2
 #define REG15_MPPT 0x15
+#define REG0F_CHARGER_CONTROL_0 0x0F
+#define REG1B_CHARGER_STATUS_0 0x1B
+#define REG1C_CHARGER_STATUS_1 0x1C
+#define REG1D_CHARGER_STATUS_2 0x1D
+#define REG1E_CHARGER_STATUS_3 0x1E
+#define REG1F_CHARGER_STATUS_4 0x1F
+#define REG20_FAULT_STATUS_0 0x20
+#define REG21_FAULT_STATUS_1 0x21
 #define REG_SYSTEM_STATUS 0x0A
 #define REG_FAULT_STATUS 0x0B
 #define REG_CHARGE_STATUS 0x0C
@@ -217,6 +225,101 @@ BQ25672::ChargingStatus BQ25672::getChargingStatus() {
   }
 
   return cs;
+}
+
+esp_err_t BQ25672::isChargerEnabled(bool *enabled) {
+  if (enabled == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint16_t regVal = 0;
+  esp_err_t err = writeReadRegister(REG0F_CHARGER_CONTROL_0, 1, &regVal);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read Charger Control 0 register");
+    return err;
+  }
+
+  // Bit 5 (EN_CHG): 1 = enable charge, 0 = disable
+  *enabled = (regVal & (1 << 5)) != 0;
+  ESP_LOGI(TAG, "Charger EN_CHG bit: %s (REG0F=0x%.2x)", *enabled ? "ENABLED" : "DISABLED",
+           static_cast<uint8_t>(regVal));
+  return ESP_OK;
+}
+
+esp_err_t BQ25672::readStatusSnapshot(ChargerStatusSnapshot &out) {
+  uint16_t r1b = 0, r1c = 0, r1d = 0, r1e = 0, r1f = 0, r20 = 0, r21 = 0;
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG1B_CHARGER_STATUS_0, 1, &r1b), TAG,
+                      "Failed read REG1B");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG1C_CHARGER_STATUS_1, 1, &r1c), TAG,
+                      "Failed read REG1C");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG1D_CHARGER_STATUS_2, 1, &r1d), TAG,
+                      "Failed read REG1D");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG1E_CHARGER_STATUS_3, 1, &r1e), TAG,
+                      "Failed read REG1E");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG1F_CHARGER_STATUS_4, 1, &r1f), TAG,
+                      "Failed read REG1F");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG20_FAULT_STATUS_0, 1, &r20), TAG,
+                      "Failed read REG20");
+  ESP_RETURN_ON_ERROR(writeReadRegister(REG21_FAULT_STATUS_1, 1, &r21), TAG,
+                      "Failed read REG21");
+
+  out.chg_stat = (static_cast<uint8_t>(r1c) >> 5) & 0x07;
+  out.iindpm_active = (static_cast<uint8_t>(r1b) & (1 << 7)) != 0;
+  out.thermal_regulation = (static_cast<uint8_t>(r1d) & (1 << 2)) != 0;
+  out.safety_tmr_fast = (static_cast<uint8_t>(r1e) & (1 << 3)) != 0;
+  out.safety_tmr_trickle = (static_cast<uint8_t>(r1e) & (1 << 2)) != 0;
+  out.safety_tmr_pre = (static_cast<uint8_t>(r1e) & (1 << 1)) != 0;
+  out.ts_cold = (static_cast<uint8_t>(r1f) & (1 << 3)) != 0;
+  out.ts_cool = (static_cast<uint8_t>(r1f) & (1 << 2)) != 0;
+  out.ts_warm = (static_cast<uint8_t>(r1f) & (1 << 1)) != 0;
+  out.ts_hot = (static_cast<uint8_t>(r1f) & (1 << 0)) != 0;
+  out.vbus_ovp = (static_cast<uint8_t>(r20) & (1 << 6)) != 0;
+  out.vbat_ovp = (static_cast<uint8_t>(r20) & (1 << 5)) != 0;
+  out.ibus_ocp = (static_cast<uint8_t>(r20) & (1 << 4)) != 0;
+  out.ibat_ocp = (static_cast<uint8_t>(r20) & (1 << 3)) != 0;
+  out.tshut = (static_cast<uint8_t>(r21) & (1 << 2)) != 0;
+
+  return ESP_OK;
+}
+
+void BQ25672::debugPrintStatusSnapshot() {
+  ChargerStatusSnapshot s{};
+  if (readStatusSnapshot(s) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read charger status snapshot");
+    return;
+  }
+
+  ESP_LOGI(TAG, "CHG_STAT = %u", s.chg_stat);
+
+  if (s.vbus_ovp) {
+    ESP_LOGW(TAG, "VBUS OVP active");
+  }
+  if (s.vbat_ovp) {
+    ESP_LOGW(TAG, "VBAT OVP active");
+  }
+  if (s.ibus_ocp) {
+    ESP_LOGW(TAG, "IBUS OCP active");
+  }
+  if (s.ibat_ocp) {
+    ESP_LOGW(TAG, "IBAT OCP active");
+  }
+  if (s.iindpm_active) {
+    ESP_LOGW(TAG, "IINDPM active (input current limited)");
+  }
+  if (s.thermal_regulation) {
+    ESP_LOGW(TAG, "Thermal regulation active");
+  }
+  if (s.safety_tmr_fast || s.safety_tmr_trickle || s.safety_tmr_pre) {
+    ESP_LOGW(TAG, "Safety timer expired (fast=%d, trickle=%d, pre=%d)", s.safety_tmr_fast,
+             s.safety_tmr_trickle, s.safety_tmr_pre);
+  }
+  if (s.ts_cold || s.ts_cool || s.ts_warm || s.ts_hot) {
+    ESP_LOGW(TAG, "JEITA TS: cold=%d cool=%d warm=%d hot=%d", s.ts_cold, s.ts_cool, s.ts_warm,
+             s.ts_hot);
+  }
+  if (s.tshut) {
+    ESP_LOGE(TAG, "Thermal shutdown active");
+  }
 }
 
 esp_err_t BQ25672::getVBATRaw(uint16_t *output) {

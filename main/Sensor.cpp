@@ -461,6 +461,20 @@ void Sensor::_measure(AirgradientClient::MaxSensorPayload &data) {
       data.vPanel = output / 1000.0; // Convert from mV to V
       ESP_LOGD(TAG, "VBUS: %.2fV", data.vPanel);
     }
+
+    // Fetch and log charging/charger status so it is sampled alongside other sensors
+    charger_->getChargingStatus();
+
+    bool chgEnabled = false;
+    err = charger_->isChargerEnabled(&chgEnabled);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Charger failed read EN_CHG bit");
+    } else {
+      ESP_LOGD(TAG, "Charger EN_CHG: %s", chgEnabled ? "enabled" : "disabled");
+    }
+
+    // Capture and print a status snapshot to help diagnose why charging might not occur
+    charger_->debugPrintStatusSnapshot();
   }
 
   if (_alphaSenseGasAvailable) {

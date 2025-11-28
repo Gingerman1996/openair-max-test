@@ -38,6 +38,28 @@ public:
   esp_err_t getBatteryCurrent(int16_t *output);
 
   ChargingStatus getChargingStatus();
+  esp_err_t isChargerEnabled(bool *enabled);
+
+  struct ChargerStatusSnapshot {
+    uint8_t chg_stat = 0;
+    bool vbus_ovp = false;
+    bool vbat_ovp = false;
+    bool ibus_ocp = false;
+    bool ibat_ocp = false;
+    bool iindpm_active = false;
+    bool thermal_regulation = false;
+    bool safety_tmr_fast = false;
+    bool safety_tmr_trickle = false;
+    bool safety_tmr_pre = false;
+    bool ts_cold = false;
+    bool ts_cool = false;
+    bool ts_warm = false;
+    bool ts_hot = false;
+    bool tshut = false;
+  };
+
+  esp_err_t readStatusSnapshot(ChargerStatusSnapshot &out);
+  void debugPrintStatusSnapshot();
 
   // Read Raw ADC values
   esp_err_t getVBATRaw(uint16_t *output);
